@@ -7,7 +7,7 @@ def sys_safe_check_prompt(tool_calls_info) -> str:
     工具调用信息：{tool_calls_info}
     
     请严格按照以下 JSON 格式回复，不要包含其他多余的 markdown 标记或文本：
-    {{"is_dangerous": true或false, "reason": "判断的具体原因（如果判定为高危或耗时操作，请在原因中详细说明）"}}
+    {{"is_dangerous": true或false, "reason": "判断的具体原因（如果判定为高危或耗时操作，请在原因中详细说明）","file":"操作的文件名(需要绝对路径)"}}
     """
 
     return prompt

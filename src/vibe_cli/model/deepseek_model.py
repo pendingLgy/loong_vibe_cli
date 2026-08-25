@@ -20,6 +20,7 @@ class AgentState(TypedDict):
     temperature: NotRequired[float]
     base_url: str
     api_key: str
+    work_dir: str
 
 
 class SafetyCheckResult(BaseModel):

@@ -1,34 +1,64 @@
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-from vibe_cli.workflow.base_workflow import start
+def get_base_dir() -> Path:
+    """获取根目录：兼顾开发环境与 PyInstaller 打包后的 .exe 环境"""
+    # 检查当前是否被打包成了 exe (PyInstaller 的特征)
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的 exe，根目录就是 .exe 文件当前所在的目录
+        return Path(sys.executable).resolve().parent
+    else:
+        # 开发环境：向上递归查找包含 pyproject.toml 的目录
+        current_path = Path(__file__).resolve()
+        for parent in [current_path] + list(current_path.parents):
+            if (parent / "pyproject.toml").exists():
+                return parent
+        return Path.cwd()
 
-# 1. 优先读取系统环境变量中指定的 APP_ENV（比如 production 或 development）
-# 如果没指定，默认加载 .env.development 或直接加载 .env
+# 获取正确的基准根目录
+BASE_DIR = get_base_dir()
+
+# 优先读取系统环境变量中指定的 APP_ENV（比如 production 或 development）
 app_env = os.getenv("APP_ENV", "development")
 
-# 2. 查找对应的环境配置文件（支持在打包后的 exe 同级目录下放置）
-env_file = f".env.{app_env}"
 
-if os.path.exists(env_file):
+def _resolve_env_file():
+    # 候选顺序：
+    #   a) 当前工作目录（兼容打包后 exe 同级放置 .env）
+    #   b) 项目根目录（开发模式：.env 位于项目最外层）
+    candidates = [
+        Path.cwd() / f".env.{app_env}",
+        Path.cwd() / ".env",
+        BASE_DIR / f".env.{app_env}",
+        BASE_DIR / ".env",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+# 2. 查找并加载环境配置文件
+env_file = _resolve_env_file()
+if env_file is not None:
     load_dotenv(env_file)
     print(f"[Config] 已加载配置文件: {env_file}")
-elif os.path.exists(".env"):
-    load_dotenv(".env")
-    print("[Config] 已加载默认配置文件: .env")
 else:
     print("[Config] 未找到环境配置文件，将直接读取系统环境变量。")
 
+from vibe_cli.workflow.base_workflow import start
 from vibe_cli.env.logger_config import logger
 
 
 def run() -> None:
-    logger.info("Hello from vibe-cli!")
-    # 🟢 关键：在 Windows 下强制切换事件循环策略为 SelectorEventLoop
+    # 关键：在 Windows 下强制切换事件循环策略为 SelectorEventLoop
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     asyncio.run(start())
+
+    logger.success("started")

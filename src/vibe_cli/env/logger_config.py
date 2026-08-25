@@ -42,5 +42,8 @@ logger.add(
     encoding="utf-8"
 )
 
+
+logger.success(f"init logger config, path:{LOG_DIR}")
+
 # 导出配置好的 logger
 __all__ = ["logger"]
