@@ -67,7 +67,7 @@ class ShellInput(BaseModel):
 )
 def execute_shell_command(command: str, cwd: str) -> str:
     """在本地安全地执行终端命令行（Shell 命令），并返回输出结果或错误信息。"""
-    logger.info(f"\n⚡ [Vibe Coding 终端执行] 正在运行命令: {command}")
+
 
     # 严格校验：确保用户输入了路径
     if not cwd or not cwd.strip():
@@ -79,6 +79,8 @@ def execute_shell_command(command: str, cwd: str) -> str:
     # 校验用户输入的路径在本地是否存在且为目录
     if not os.path.exists(target_cwd) or not os.path.isdir(target_cwd):
         return f"错误: 用户指定的路径 '{target_cwd}'（原始输入: {cwd}）在本地不存在或不是一个有效的目录。"
+
+    logger.info(f"\n⚡ [Vibe Coding 终端执行] dir:{target_cwd} 正在运行命令: {command}")
 
     try:
         # 使用 subprocess 运行命令

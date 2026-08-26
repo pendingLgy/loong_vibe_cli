@@ -2,7 +2,6 @@ import json
 import os
 import subprocess
 import uuid
-from pathlib import Path
 from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AIMessage
@@ -17,6 +16,7 @@ from rich.prompt import Confirm
 from vibe_cli.env.check_point_memory import postgres_memory
 from vibe_cli.env.logger_config import logger
 from vibe_cli.model.deepseek_model import AgentState, get_model_by_name
+from vibe_cli.prompt.sys_env_prompt import sys_env_shell_prompt
 from vibe_cli.prompt.sys_safe_check_prompt import sys_safe_check_prompt
 from vibe_cli.tools import ALL_TOOLS
 from vibe_cli.wraps.monitor import monitor_node
@@ -278,40 +278,9 @@ def dynamic_shell_diff_node(state: AgentState) -> dict:
         return {}
 
     last_message = messages[-1]
-    cwd = os.getenv("work_dir") or os.getcwd()
-
-    logger.info("🔍 [Git Diff Node] 正在通过原生 Git 命令获取并解析工作区变更...")
+    cwd = os.getenv("work_dir")
 
     try:
-
-        # 1. 直接通过 git diff 获取代码差异
-        diff_res = subprocess.run(
-            ["git", "diff"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        diff_output = diff_res.stdout.strip()
-
-        # 2. 获取文件状态概览 (git status -s)
-        status_res = subprocess.run(
-            ["git", "status", "-s"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        status_output = status_res.stdout.strip()
-
-        if not status_output and not diff_output:
-            return {}
-
-        status_output = status_res.stdout.strip()
-
-        # 如果既没有状态也没有 diff，静默跳过
-        if not status_output and not diff_output:
-            return {}
 
         # 3. 让 LLM 专注于总结变更内容
         logger.info("🧠 [Git Diff Node] 正在请求 LLM 总结变更内容...")
@@ -329,8 +298,7 @@ def dynamic_shell_diff_node(state: AgentState) -> dict:
             )),
             HumanMessage(content=(
                 f"当前工作区绝对路径: {cwd}\n\n"
-                f"--- Git Status ---\n{status_output}\n\n"
-                f"--- Git Diff ---\n{diff_output if len(diff_output) <= 6000 else diff_output[:6000] + '...(内容已折叠)...'}"
+                f"--- 变更内容 ---\n{last_message}\n\n"
             ))
         ]
 
@@ -347,19 +315,20 @@ def dynamic_shell_diff_node(state: AgentState) -> dict:
 
         formatted_report = f"\n\n{summary_report}"
 
-        # 4. 拼接到原 ToolMessage 后面
-        updated_content = last_message.content + formatted_report
-        updated_msg = ToolMessage(
-            content=updated_content,
-            tool_call_id=last_message.tool_call_id,
-            name=last_message.name
-        )
-
-        return {"messages": [updated_msg]}
+        # 或者作为独立的辅助信息（推荐，避免污染原消息结构）
+        report_msg = HumanMessage(content=f"📂 [自动检测到工作区变更]:{formatted_report}")
+        return {
+            "requires_approval": False,
+            "node_status": "normal",
+            "messages": report_msg
+        }
 
     except Exception as e:
-        logger.exception(f"动态生成或执行 Diff 命令失败: {e}")
-        return {}
+        logger.exception(f"动态生成或执行 Diff 命令失败: cmd:{cwd} \nmsg: {e}")
+        return {
+            "requires_approval": False,
+            "node_status": "normal",
+        }
 
 
 async def build_vibe_app():
@@ -452,6 +421,7 @@ async def start():
     app = await build_vibe_app()
     config = {"configurable": {"thread_id": str(uuid.uuid4())}}
     system_prompt = load_system_prompt()
+    system_env_shell_prompt = sys_env_shell_prompt(work_dir)
 
     console.print(Panel.fit(
         "🚀 [bold cyan]Local Vibe Coding Assistant (Official Interrupt)[/bold cyan]\n输入你的需求，输入 exit 退出。",
@@ -473,7 +443,9 @@ async def start():
                             "api_key": api_key,
                             "temperature": temperature,
                             "work_dir": work_dir,
-                            "messages": [SystemMessage(content=system_prompt), HumanMessage(content=user_input)]}
+                            "messages": [SystemMessage(content=system_prompt),
+                                         SystemMessage(content=system_env_shell_prompt),
+                                         HumanMessage(content=user_input)]}
 
             while True:
                 # 驱动图执行
