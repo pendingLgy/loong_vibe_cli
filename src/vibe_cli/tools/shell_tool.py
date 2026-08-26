@@ -1,11 +1,9 @@
 import locale
 import os
-import re
 import subprocess
-from pathlib import Path
 
 from langchain_core.tools import tool
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 
 from vibe_cli.env.logger_config import logger
@@ -44,6 +42,7 @@ def __decode(data) -> str:
 
     # 4. 最终兜底
     return data.decode("utf-8", errors="replace")
+
 
 # 使用 Pydantic 定义严谨的输入参数结构与描述
 class ShellInput(BaseModel):
@@ -91,7 +90,6 @@ def execute_shell_command(command: str, cwd: str) -> str:
             timeout=30,
             cwd=target_cwd,
         )
-
 
         stdout = __decode(result.stdout)
         stderr = __decode(result.stderr)

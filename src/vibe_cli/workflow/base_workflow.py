@@ -1,6 +1,8 @@
 import json
 import os
+import subprocess
 import uuid
+from pathlib import Path
 from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AIMessage
@@ -23,15 +25,26 @@ console = Console()
 
 
 def load_system_prompt() -> str:
-    # 优先读取项目根目录下的 struct.md 作为系统提示词
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    # 1. 优先从当前工作目录 (work_dir 或 os.getcwd()) 下的 .vcl 目录中读取 struct.md
+    work_dir = os.getenv("work_dir") or os.getcwd()
+
     candidates = [
-        os.path.join(project_root, "struct.md"),
+        os.path.join(work_dir, ".vcl", "struct.md"),
     ]
+
+    # 2. 如果需要保留对项目根目录的兜底，可以在这里继续添加备选路径
+    # project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    # candidates.append(os.path.join(project_root, "struct.md"))
     for struct_path in candidates:
         if os.path.exists(struct_path):
-            with open(struct_path, encoding="utf-8") as f:
-                return f.read()
+            try:
+                with open(struct_path, encoding="utf-8") as f:
+                    logger.success(f"load vcl md successfully from {struct_path}")
+                    return f.read()
+            except Exception as e:
+                logger.exception(f"load vcl md error {str(e)}")
+                continue
+
     return ""
 
 
@@ -71,6 +84,42 @@ def route_safety_command(state: AgentState) -> Literal["pend_approval_path", "to
 
     return "end_path"
 
+
+def route_check_mutation(state: dict) -> str:
+    """
+    【条件分支路由函数】
+    检查刚刚执行的工具返回内容，通过通用的 git status 或文件变动快速探测
+    当前工作区是否有编辑、新增或删除操作，决定是否需要触发 Diff 生成。
+    """
+    messages = state.get("messages", [])
+    if not messages:
+        return "skip_diff_path"
+
+    last_message = messages[-1]
+
+    # 确保上一条消息是工具执行结果
+    if not isinstance(last_message, ToolMessage):
+        return "skip_diff_path"
+
+    cwd = os.getenv("work_dir") or os.getcwd()
+
+    try:
+        # 这里用通用的 git status 作为快速检查兜底（可适配大部分主流项目）
+        res = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        # 如果有输出说明产生了改动，触发动态 Diff 流程
+        if res.returncode == 0 and res.stdout.strip():
+            return "run_diff_path"
+    except Exception as e:
+        logger.exception(f"error {e}")
+        pass
+
+    return "skip_diff_path"
 
 def route_approval(state: AgentState):
     if state.get("node_status") == "normal":
@@ -218,6 +267,101 @@ def pend_approval_interrupt_node(state: AgentState):
         }
 
 
+@monitor_node("dynamic_shell_diff_node")
+def dynamic_shell_diff_node(state: AgentState) -> dict:
+    """
+        【纯 Python Git 变更收集与报告生成节点】
+        不使用 LLM 总结，直接通过 Git 命令、本地解析行号（@@ 块）及绝对路径拼装报告。
+        """
+    messages = state.get("messages", [])
+    if not messages:
+        return {}
+
+    last_message = messages[-1]
+    cwd = os.getenv("work_dir") or os.getcwd()
+
+    logger.info("🔍 [Git Diff Node] 正在通过原生 Git 命令获取并解析工作区变更...")
+
+    try:
+
+        # 1. 直接通过 git diff 获取代码差异
+        diff_res = subprocess.run(
+            ["git", "diff"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        diff_output = diff_res.stdout.strip()
+
+        # 2. 获取文件状态概览 (git status -s)
+        status_res = subprocess.run(
+            ["git", "status", "-s"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        status_output = status_res.stdout.strip()
+
+        if not status_output and not diff_output:
+            return {}
+
+        status_output = status_res.stdout.strip()
+
+        # 如果既没有状态也没有 diff，静默跳过
+        if not status_output and not diff_output:
+            return {}
+
+        # 3. 让 LLM 专注于总结变更内容
+        logger.info("🧠 [Git Diff Node] 正在请求 LLM 总结变更内容...")
+
+        prompt = [
+            SystemMessage(content=(
+                "你是一个专业的技术文档与代码审计专家。\n"
+                "下面提供了当前项目通过 Git 获取到的文件状态和详细 Diff。\n"
+                "请你为用户生成一份结构清晰的【工作区文件变更汇总报告】。\n\n"
+                "【严格规范要求】：\n"
+                "1. 如果没有任何实质性变更，请返回空字符串。\n"
+                "2. 必须将所有文件路径转换为基于当前工作区的**完整绝对路径**。\n"
+                "3. 对于编辑（Modify）或删除（Delete）操作，必须结合 Diff 中的 @@ 块信息指出其**代码行号范围**（例如 Lines 10-15）。\n"
+                "4. 保持格式整洁，使用 Markdown 格式展现（包含新增、修改、删除分类以及 diff 代码块）。"
+            )),
+            HumanMessage(content=(
+                f"当前工作区绝对路径: {cwd}\n\n"
+                f"--- Git Status ---\n{status_output}\n\n"
+                f"--- Git Diff ---\n{diff_output if len(diff_output) <= 6000 else diff_output[:6000] + '...(内容已折叠)...'}"
+            ))
+        ]
+
+        response = get_model_by_name(
+            model_name=state.get("model_name"),
+            base_url=state.get("base_url"),
+            api_key=state.get("api_key"),
+            temperature=state.get("temperature", 0.0)
+        ).invoke(prompt)
+
+        summary_report = response.content.strip()
+        if not summary_report:
+            return {}
+
+        formatted_report = f"\n\n{summary_report}"
+
+        # 4. 拼接到原 ToolMessage 后面
+        updated_content = last_message.content + formatted_report
+        updated_msg = ToolMessage(
+            content=updated_content,
+            tool_call_id=last_message.tool_call_id,
+            name=last_message.name
+        )
+
+        return {"messages": [updated_msg]}
+
+    except Exception as e:
+        logger.exception(f"动态生成或执行 Diff 命令失败: {e}")
+        return {}
+
+
 async def build_vibe_app():
     checkpointer = await postgres_memory()
 
@@ -228,6 +372,7 @@ async def build_vibe_app():
     workflow.add_node("safety_check", safety_check_node)
     workflow.add_node("pend_approval", pend_approval_interrupt_node)
     workflow.add_node("tools", tool_node)
+    workflow.add_node("dynamic_diff_node", dynamic_shell_diff_node)
 
     workflow.set_entry_point("agent")
 
@@ -261,8 +406,16 @@ async def build_vibe_app():
         }
     )
 
-    # 审批通过后，由 pend_approval 节点流转到 tools 节点执行
-    workflow.add_edge("tools", "agent")
+    workflow.add_conditional_edges(
+        "tools",
+        route_check_mutation,
+        {
+            "run_diff_path": "dynamic_diff_node",
+            "skip_diff_path": "agent"
+        }
+    )
+
+    workflow.add_edge("dynamic_diff_node", "agent")
 
     return workflow.compile(
         checkpointer=checkpointer
