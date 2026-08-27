@@ -10,7 +10,7 @@ def enforce_workspace_security(func):
     @functools.wraps(func)
     def wrapper(command: str, cwd: str, *args, **kwargs):
         # 1. 获取全局工作目录（安全兜底）
-        work_dir_env = os.getenv("work_dir") or "F:\\workspace\\code\\python\\vibe-cli"
+        work_dir_env = os.getenv("work_dir")
         WORK_DIR = Path(work_dir_env).resolve()
 
         # ==========================================

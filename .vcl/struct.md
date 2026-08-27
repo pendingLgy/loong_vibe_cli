@@ -10,7 +10,6 @@
 vibe-cli\
 ├─ pyproject.toml              # 项目配置(uv): 依赖、命令行入口 vibe-cli = vibe_cli:main
 ├─ README.md                   # 项目说明
-├─ struct.md                   # 项目结构文档，会作为 AI 系统提示词
 ├─ .gitignore                  # 忽略 __pycache__ / .venv / .idea / logs 等
 ├─ .python-version             # Python 3.13
 ├─ uv.lock                     # uv 依赖锁文件
@@ -31,12 +30,13 @@ vibe-cli\
       │
       ├─ prompt\               # 提示词模板
       │   ├─ sys_safe_check_prompt.py   # 工具调用安全审查提示词(高风险、耗时操作判定)
-      │   ├─ sys_env_prompt.py           # 跨平台 Shell 系统提示词(平台适配、工作区越权拦截, 启动时注入模型)
+      │   ├─ sys_env_prompt.py           # 跨平台 Shell 提示词(sys_env_shell_prompt) + Vibe Coding 提示词(sys_vibe_coding_agent)
       │   └─ __init__.py
       │
       ├─ tools\                # Agent 可用工具
       │   ├─ shell_tool.py          # shell 命令执行工具(多编码解码、失败重试、30s 超时、日志记录实际生效目录)
-      │   └─ __init__.py            # ALL_TOOLS 工具注册表
+      │   ├─ show_diff_tool.py      # IDEA Diff 工具(拉起 IDEA 打开文件 vs Git HEAD, 临时文件存 .vcl/.idea_diff)
+      │   └─ __init__.py            # ALL_TOOLS 工具注册表(execute_shell_command + show_diff)
       │
       ├─ wraps\                # 装饰器与安全包装层
       │   ├─ monitor.py             # LangGraph 节点监控装饰器(记录耗时与成败日志)
@@ -55,11 +55,11 @@ vibe-cli\
    - ``safety_check``：对工具调用进行 LLM 安全审查（返回 SafetyCheckResult）
    - ``pend_approval``：高危操作通过 ``interrupt()`` 挂起，等待人工审批
    - ``tools``：ToolNode 执行工具（ALL_TOOLS 注册表）
-   - ``dynamic_diff_node``：工具执行后自动探测工作区变更，生成 diff 变更报告（dynamic_shell_diff_node）
-   - 条件路由：``route_agent``（普通对话结束 / 工具调用进安全审查）、``route_safety_command``（需审批挂起 / 安全直执行 / 拒绝结束）、``route_approval``（审批通过执行工具 / 拒绝回 agent）、``route_check_mutation``（工具执行后探测工作区变更：有变更去 diff / 无变更回 agent）
-3. 工具执行后由 ``route_check_mutation`` 探测工作区变更，决定是否触发动态 Diff：
-   - 有变更 -> ``dynamic_diff_node`` 通过原生 git diff/status 生成变更报告（作为独立 HumanMessage 注入，避免污染原 ToolMessage 结构），再回到 agent
-   - 无变更 -> 直接回到 agent 循环
+   - ``dynamic_diff_node``：工具执行后基于用户意图生成 diff 变更报告（dynamic_shell_diff_node）
+   - 条件路由：``route_agent``（普通对话结束 / 工具调用进安全审查）、``route_safety_command``（需审批挂起 / 安全直执行 / 拒绝结束）、``route_approval``（审批通过执行工具 / 拒绝回 agent）、``route_check_mutation``（工具执行后基于用户意图判断是否进入 diff 节点）
+3. 工具执行后由 ``route_check_mutation`` 基于用户意图（diff/变更/git status 等关键词）决定是否触发动态 Diff：
+   - 用户有查看变更意图 -> ``dynamic_diff_node`` 通过原生 git diff/status 生成变更报告（作为独立 HumanMessage 注入，避免污染原 ToolMessage 结构），再回到 agent
+   - 用户无查看变更意图 -> 直接回到 agent 循环
 
 4. 高风险操作通过 ``interrupt()`` 挂起，外部 CLI 使用 ``Command(resume=...)`` 传入 ``approved`` 或 ``rejected`` 恢复：
    - 批准 -> ``node_status=normal``，继续执行工具并回到 agent 循环
@@ -67,7 +67,7 @@ vibe-cli\
 5. 模型由 ``deepseek_model.get_model_by_name`` 创建（支持 deepseek-chat 等）
 6. 对话消息通过 PostgreSQL Checkpointer 持久化，支持断点续跑（thread_id 恢复上下文）
 7. 本文件 ``struct.md`` 会被 ``base_workflow.load_system_prompt()`` 读取作为系统提示词，帮助 AI 理解项目结构
-8. ``base_workflow.start()`` 启动会话时调用 ``sys_env_prompt.sys_env_shell_prompt(work_dir)`` 生成跨平台 Shell 系统提示词，作为第二条 SystemMessage 注入模型，强化平台适配与工作区越权拦截
+8. ``base_workflow.start()`` 启动会话时依次注入三条 SystemMessage：``sys_vibe_coding_agent()``（Vibe Coding 编程助手提示词）→ ``load_system_prompt()`` 读取的 ``struct.md`` → ``sys_env_shell_prompt(work_dir)``（跨平台 Shell 提示词），强化平台适配与工作区越权拦截
 
 ## 安全机制
 
@@ -75,3 +75,5 @@ vibe-cli\
 - ``wraps.workspace_security`` 的 ``enforce_workspace_security`` 装饰器包装 shell 工具，拦截 cwd 越权与 command 中的绝对路径越权
 - 所有节点由 ``wraps.monitor`` 的 ``monitor_node`` 装饰器监控，记录节点耗时与成败日志
 - ``sys_env_prompt.sys_env_shell_prompt(work_dir)`` 在提示词层面对模型进行跨平台适配引导与工作区越权约束，与 ``workspace_security`` 装饰器形成双层防线
+- ``route_check_mutation`` 基于用户输入中的 diff/变更意图关键词触发动态 Diff，无相关意图时跳过节点，减少无谓工具调用
+- ``show_diff_tool.py`` 拉起 IDEA diff 对比文件与 Git HEAD，临时 HEAD 文件存于 .vcl/.idea_diff，程序退出时自动清理
