@@ -12,7 +12,9 @@ Python 3.13 / uv / langchain / langgraph / loguru / rich / pydantic / PostgreSQL
 vibe-cli\
 ├─ pyproject.toml              # 项目配置(uv): 依赖、命令行入口 vibe-cli = vibe_cli:main
 ├─ README.md                   # 项目说明
-├─ struct.md                   # 项目结构文档，会作为 AI 系统提示词
+├─ .vcl\
+   ├─ skill\                   # skill 存放目录
+   └─ struct.md                # 项目结构文档，会作为 AI 系统提示词
 ├─ .gitignore                  # 忽略 __pycache__ / .venv / .idea / logs 等
 ├─ .python-version             # Python 3.13
 ├─ uv.lock                     # uv 依赖锁文件
@@ -77,9 +79,6 @@ uv tool install .       # 全局安装命令行工具
 
 安装后可直接使用 vibe-cli 命令启动。
 
-## 许可证
-
-Copyright (c) loong. 保留所有权利。
 
 ## .env 配置说明
 
