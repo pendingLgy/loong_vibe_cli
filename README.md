@@ -33,10 +33,11 @@ vibe-cli\
       │
       ├─ prompt\               # 提示词模板
       │   ├─ sys_safe_check_prompt.py   # 工具调用安全审查提示词(高风险、耗时操作判定)
+      │   ├─ sys_env_prompt.py           # 跨平台 Shell 系统提示词(平台适配、工作区越权拦截, 启动时注入模型)
       │   └─ __init__.py
       │
       ├─ tools\                # Agent 可用工具
-      │   ├─ shell_tool.py          # shell 命令执行工具(多编码解码、失败重试、30s 超时)
+      │   ├─ shell_tool.py          # shell 命令执行工具(多编码解码、失败重试、30s 超时、日志记录实际生效目录)
       │   └─ __init__.py            # ALL_TOOLS 工具注册表
       │
       ├─ wraps\                # 装饰器与安全包装层
@@ -45,27 +46,9 @@ vibe-cli\
       │   └─ __init__.py
       │
       └─ workflow\             # LangGraph 工作流
-         ├─ base_workflow.py      # 核心图: StateGraph + 安全审查路由 + 人工审批中断 + 读取 struct.md 作为系统提示
+         ├─ base_workflow.py      # 核心图: StateGraph + 安全审查路由 + 人工审批中断 + 动态 Diff 变更报告 + 读取 struct.md 作为系统提示
          └─ __init__.py
 ```
-## 关键流程
-
-1. ``main.run()`` 加载 .env 环境变量后调用 ``workflow.base_workflow.start()``
-2. ``base_workflow`` 构建 StateGraph（4 个节点）：
-   - ``agent``(模型生成回复、工具调用) -> ``safety_check`` 安全审查 -> ``pend_approval``(interrupt 挂起) / ``tools`` 工具执行
-   - 高风险操作通过 ``interrupt()`` 挂起等待人工审批（requires_approval + NodeStatus）
-   - 审批通过（``Command(resume=approved)``）后执行工具并回到 ``agent`` 循环；拒绝则生成 ToolMessage 拦截该操作并结束本轮
-3. 模型由 ``deepseek_model.get_model_by_name`` 创建(支持 deepseek-chat 等)
-4. 对话消息通过 PostgreSQL Checkpointer 持久化，支持断点续跑
-5. ``struct.md`` 会被 ``base_workflow.load_system_prompt()`` 读取作为系统提示词，帮助 AI 理解项目结构
-
-## 安全机制说明
-
-1. Agent 决定调用工具时，sys_safe_check_prompt 生成审查提示词
-2. 模型返回 SafetyCheckResult 判定 is_dangerous
-3. 高风险操作触发 ``pend_approval`` 节点 ``interrupt()``，挂起等待用户确认
-4. 用户批准后继续执行，拒绝则生成 ToolMessage 拦截并结束本轮
-5. 工作区安全装饰器 ``enforce_workspace_security`` 拦截 cwd 越权与 command 中的绝对路径越权
 
 ## 持久化说明
 

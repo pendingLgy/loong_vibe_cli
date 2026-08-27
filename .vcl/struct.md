@@ -31,10 +31,11 @@ vibe-cli\
       │
       ├─ prompt\               # 提示词模板
       │   ├─ sys_safe_check_prompt.py   # 工具调用安全审查提示词(高风险、耗时操作判定)
+      │   ├─ sys_env_prompt.py           # 跨平台 Shell 系统提示词(平台适配、工作区越权拦截, 启动时注入模型)
       │   └─ __init__.py
       │
       ├─ tools\                # Agent 可用工具
-      │   ├─ shell_tool.py          # shell 命令执行工具(多编码解码、失败重试、30s 超时)
+      │   ├─ shell_tool.py          # shell 命令执行工具(多编码解码、失败重试、30s 超时、日志记录实际生效目录)
       │   └─ __init__.py            # ALL_TOOLS 工具注册表
       │
       ├─ wraps\                # 装饰器与安全包装层
@@ -57,7 +58,7 @@ vibe-cli\
    - ``dynamic_diff_node``：工具执行后自动探测工作区变更，生成 diff 变更报告（dynamic_shell_diff_node）
    - 条件路由：``route_agent``（普通对话结束 / 工具调用进安全审查）、``route_safety_command``（需审批挂起 / 安全直执行 / 拒绝结束）、``route_approval``（审批通过执行工具 / 拒绝回 agent）、``route_check_mutation``（工具执行后探测工作区变更：有变更去 diff / 无变更回 agent）
 3. 工具执行后由 ``route_check_mutation`` 探测工作区变更，决定是否触发动态 Diff：
-   - 有变更 -> ``dynamic_diff_node`` 通过原生 git diff/status 生成变更报告（追加到 ToolMessage 或新建 AIMessage），再回到 agent
+   - 有变更 -> ``dynamic_diff_node`` 通过原生 git diff/status 生成变更报告（作为独立 HumanMessage 注入，避免污染原 ToolMessage 结构），再回到 agent
    - 无变更 -> 直接回到 agent 循环
 
 4. 高风险操作通过 ``interrupt()`` 挂起，外部 CLI 使用 ``Command(resume=...)`` 传入 ``approved`` 或 ``rejected`` 恢复：
@@ -66,9 +67,11 @@ vibe-cli\
 5. 模型由 ``deepseek_model.get_model_by_name`` 创建（支持 deepseek-chat 等）
 6. 对话消息通过 PostgreSQL Checkpointer 持久化，支持断点续跑（thread_id 恢复上下文）
 7. 本文件 ``struct.md`` 会被 ``base_workflow.load_system_prompt()`` 读取作为系统提示词，帮助 AI 理解项目结构
+8. ``base_workflow.start()`` 启动会话时调用 ``sys_env_prompt.sys_env_shell_prompt(work_dir)`` 生成跨平台 Shell 系统提示词，作为第二条 SystemMessage 注入模型，强化平台适配与工作区越权拦截
 
 ## 安全机制
 
 - 工具调用前由 ``safety_check`` 节点审查，高风险、耗时操作进入人工审批（``pend_approval`` 节点 interrupt 挂起）
 - ``wraps.workspace_security`` 的 ``enforce_workspace_security`` 装饰器包装 shell 工具，拦截 cwd 越权与 command 中的绝对路径越权
 - 所有节点由 ``wraps.monitor`` 的 ``monitor_node`` 装饰器监控，记录节点耗时与成败日志
+- ``sys_env_prompt.sys_env_shell_prompt(work_dir)`` 在提示词层面对模型进行跨平台适配引导与工作区越权约束，与 ``workspace_security`` 装饰器形成双层防线

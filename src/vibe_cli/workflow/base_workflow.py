@@ -16,7 +16,7 @@ from rich.prompt import Confirm
 from vibe_cli.env.check_point_memory import postgres_memory
 from vibe_cli.env.logger_config import logger
 from vibe_cli.model.deepseek_model import AgentState, get_model_by_name
-from vibe_cli.prompt.sys_env_prompt import sys_env_shell_prompt
+from vibe_cli.prompt.sys_env_prompt import sys_env_shell_prompt, sys_vibe_coding_agent
 from vibe_cli.prompt.sys_safe_check_prompt import sys_safe_check_prompt
 from vibe_cli.tools import ALL_TOOLS
 from vibe_cli.wraps.monitor import monitor_node
@@ -87,39 +87,39 @@ def route_safety_command(state: AgentState) -> Literal["pend_approval_path", "to
 
 def route_check_mutation(state: dict) -> str:
     """
-    【条件分支路由函数】
-    检查刚刚执行的工具返回内容，通过通用的 git status 或文件变动快速探测
-    当前工作区是否有编辑、新增或删除操作，决定是否需要触发 Diff 生成。
+    【基于用户意图的条件路由】
+    只有当用户明确要求查看工作区变更/Diff，或者工具调用本身与查看变更相关时，才进入 diff 节点。
     """
     messages = state.get("messages", [])
     if not messages:
         return "skip_diff_path"
 
-    last_message = messages[-1]
+    # 1. 向上回溯，找到最近的一条人类用户输入（HumanMessage）
+    last_human_msg = None
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            last_human_msg = msg.content
+            break
 
-    # 确保上一条消息是工具执行结果
-    if not isinstance(last_message, ToolMessage):
+    # 如果找不到用户输入，默认跳过
+    if not last_human_msg:
         return "skip_diff_path"
 
-    cwd = os.getenv("work_dir") or os.getcwd()
+    # 2. 定义触发变更查看的意图关键词
+    diff_intent_keywords = [
+        "diff", "变更", "改动", "修改了什么", "查看状态",
+        "git status", "git diff", "变化", "检查代码", "看看代码"
+    ]
 
-    try:
-        # 这里用通用的 git status 作为快速检查兜底（可适配大部分主流项目）
-        res = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=2
-        )
-        # 如果有输出说明产生了改动，触发动态 Diff 流程
-        if res.returncode == 0 and res.stdout.strip():
-            return "run_diff_path"
-    except Exception as e:
-        logger.exception(f"error {e}")
-        pass
+    # 检查用户的输入中是否包含上述意图
+    user_wants_diff = any(keyword in last_human_msg.lower() for keyword in diff_intent_keywords)
 
-    return "skip_diff_path"
+    if user_wants_diff:
+        logger.info("🔍 [Diff Route Check] 检测到用户有查看变更的意图，进入 dynamic_diff_node")
+        return "run_diff_path"
+    else:
+        logger.info("⏩ [Diff Route Check] 用户未要求查看变更，直接跳过 diff 节点")
+        return "skip_diff_path"
 
 def route_approval(state: AgentState):
     if state.get("node_status") == "normal":
@@ -191,7 +191,7 @@ def safety_check_node(state: AgentState):
             reason = result_dict.get("reason", "无原因说明")
             file = result_dict.get("file", "")
 
-            logger.info(f"LLM 安全检查结果: \nis_dangerous={is_dangerous}, \n原因: {reason}, \nfile: {file}")
+            logger.info(f"LLM 安全检查结果: \nis_dangerous={is_dangerous} \n原因: {reason} \nfile: {file}")
         except Exception as e:
             logger.exception(f"LLM 安全检查解析失败: {e}，默认按安全处理")
             is_dangerous = False
@@ -420,6 +420,8 @@ async def start():
 
     app = await build_vibe_app()
     config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+
+    system_vibe_coding_prompt = sys_vibe_coding_agent()
     system_prompt = load_system_prompt()
     system_env_shell_prompt = sys_env_shell_prompt(work_dir)
 
@@ -443,7 +445,8 @@ async def start():
                             "api_key": api_key,
                             "temperature": temperature,
                             "work_dir": work_dir,
-                            "messages": [SystemMessage(content=system_prompt),
+                            "messages": [SystemMessage(content=system_vibe_coding_prompt),
+                                         SystemMessage(content=system_prompt),
                                          SystemMessage(content=system_env_shell_prompt),
                                          HumanMessage(content=user_input)]}
 
