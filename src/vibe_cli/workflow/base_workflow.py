@@ -1,7 +1,7 @@
 import json
 import os
-import subprocess
 import uuid
+from pathlib import Path
 from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AIMessage
@@ -18,13 +18,14 @@ from vibe_cli.env.logger_config import logger
 from vibe_cli.model.deepseek_model import AgentState, get_model_by_name
 from vibe_cli.prompt.sys_env_prompt import sys_env_shell_prompt, sys_vibe_coding_agent
 from vibe_cli.prompt.sys_safe_check_prompt import sys_safe_check_prompt
+from vibe_cli.skill.loading_skill import SkillRegistry
 from vibe_cli.tools import ALL_TOOLS
 from vibe_cli.wraps.monitor import monitor_node
 
 console = Console()
 
 
-def load_system_prompt() -> str:
+def load_system_struct_prompt() -> str:
     # 1. 优先从当前工作目录 (work_dir 或 os.getcwd()) 下的 .vcl 目录中读取 struct.md
     work_dir = os.getenv("work_dir") or os.getcwd()
 
@@ -120,6 +121,7 @@ def route_check_mutation(state: dict) -> str:
     else:
         logger.info("⏩ [Diff Route Check] 用户未要求查看变更，直接跳过 diff 节点")
         return "skip_diff_path"
+
 
 def route_approval(state: AgentState):
     if state.get("node_status") == "normal":
@@ -418,16 +420,37 @@ async def start():
             f"以下环境变量不能为空: {', '.join(missing_fields)}"
         )
 
-    app = await build_vibe_app()
-    config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+    # 例如在环境变量和 work_dir 准备好之后：
+    skills_dir = Path(work_dir).joinpath(".vcl", "skills")
+    skill_registry = SkillRegistry(skills_dir)
+    config = {
+        "configurable": {
+            "thread_id": str(uuid.uuid4()),
+            "skill_registry": skill_registry  # 👈 核心：作为配置传递
+        }
+    }
 
     system_vibe_coding_prompt = sys_vibe_coding_agent()
-    system_prompt = load_system_prompt()
+    system_struct_prompt = load_system_struct_prompt()
     system_env_shell_prompt = sys_env_shell_prompt(work_dir)
+    system_skill_index_prompt = skill_registry.index_content
+    print(f"skill:\n{system_skill_index_prompt}")
+
+    system_prompts = [SystemMessage(content=system_vibe_coding_prompt)]
+
+    if system_struct_prompt and system_struct_prompt.strip():
+        system_prompts.append(SystemMessage(content=system_struct_prompt))
+
+    if system_skill_index_prompt and system_skill_index_prompt.strip():
+        system_prompts.append(SystemMessage(content=system_skill_index_prompt))
+
+    system_prompts.append(SystemMessage(content=system_env_shell_prompt))
 
     console.print(Panel.fit(
         "🚀 [bold cyan]Local Vibe Coding Assistant (Official Interrupt)[/bold cyan]\n输入你的需求，输入 exit 退出。",
         border_style="cyan"))
+
+    app = await build_vibe_app()
 
     while True:
         try:
@@ -439,16 +462,27 @@ async def start():
             if not user_input.strip():
                 continue
 
+            # 🧩 新增：拦截 /skill 或 /skills 快捷指令
+            cleaned_input = user_input.strip().lower()
+            if cleaned_input in ["/skill", "/skills"]:
+                index_content = skill_registry.index_content
+                if not index_content:
+                    console.print(
+                        "[yellow]⚠️ 当前工作区暂未发现已注册的技能清单（skills/skill_index.md 不存在或为空）。[/yellow]")
+                else:
+                    console.print(
+                        Panel(Markdown(f"### 🧩 当前已注册的技能清单\n\n{index_content}"), border_style="cyan"))
+                continue  # 拦截成功后直接进入下一轮循环，不走后续的大模型 Agent 流程
+
+            messages = system_prompts + [HumanMessage(content=user_input)]
+
             # 初始输入流或恢复流
             stream_input = {"model_name": model_name,
                             "base_url": base_url,
                             "api_key": api_key,
                             "temperature": temperature,
                             "work_dir": work_dir,
-                            "messages": [SystemMessage(content=system_vibe_coding_prompt),
-                                         SystemMessage(content=system_prompt),
-                                         SystemMessage(content=system_env_shell_prompt),
-                                         HumanMessage(content=user_input)]}
+                            "messages": messages}
 
             while True:
                 # 驱动图执行
