@@ -21,6 +21,7 @@ class AgentState(TypedDict):
     base_url: str
     api_key: str
     work_dir: str
+    summary: NotRequired[str]  # rolling summary produced by message compaction
 
 
 class SafetyCheckResult(BaseModel):

@@ -93,6 +93,8 @@ uv tool install .       # 全局安装命令行工具
 | logger.dir | 日志输出目录（logs/） | 绝对路径 |
 | database_url | PostgreSQL 连接串（LangGraph Checkpointer 持久化） | postgresql+asyncpg://user:pass@localhost:5432/vibe_cli |
 | work_dir | 工作区根目录（enforce_workspace_security 装饰器的权限边界） | 绝对路径 |
+| compress_threshold_chars | 消息压缩触发阈值（非系统消息总字符数超限即压缩，默认 12000） | 12000 |
+| compress_keep_last | 消息压缩保留的最近消息条数（默认 12） | 12 |
 
 说明：
 

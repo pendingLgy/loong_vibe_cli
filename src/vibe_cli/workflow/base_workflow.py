@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command, interrupt
@@ -21,6 +21,7 @@ from vibe_cli.prompt.sys_safe_check_prompt import sys_safe_check_prompt
 from vibe_cli.skill.loading_skill import SkillRegistry
 from vibe_cli.tools import ALL_TOOLS
 from vibe_cli.wraps.monitor import monitor_node
+from vibe_cli.message.message_compactor import plan_compaction, summarize_with_model
 
 console = Console()
 
@@ -139,6 +140,9 @@ def call_model(state: AgentState):
     """
 
     messages = state.get("messages", [])
+    summary = state.get("summary") or ""
+    if summary:  # prepend rolling summary once compaction has happened
+        messages = [SystemMessage(content="【历史摘要】以下是早期对话的摘要（已压缩省略）：\n" + summary)] + messages
     response = get_model_by_name(model_name=state.get("model_name"), base_url=state.get("base_url"),
                                  api_key=state.get("api_key"), temperature=state.get("temperature", 0.0)
                                  ).bind_tools(ALL_TOOLS).invoke(messages)
@@ -148,6 +152,39 @@ def call_model(state: AgentState):
         "requires_approval": False,
         "node_status": "normal"
     }
+
+
+@monitor_node("compact_node")
+def compact_node(state):
+    """Message-history compaction node (graph entry).
+
+    Runs before the agent on every turn. When the accumulated conversation grows
+    beyond the configured threshold, oldest complete turns are absorbed into a
+    rolling LLM summary and pruned via RemoveMessage so the model context stays
+    bounded. On any summarization failure it safely no-ops.
+    """
+    messages = state.get("messages", [])
+    if not messages:  # cold start
+        return {}
+    threshold = int(os.getenv("compress_threshold_chars", "12000"))
+    keep_last = int(os.getenv("compress_keep_last", "12"))
+    old_summary = state.get("summary") or ""
+    plan = plan_compaction(messages, keep_last=keep_last, threshold_chars=threshold)
+    if plan is None:  # context is still small enough
+        return {}
+    cutoff, history = plan
+    model = get_model_by_name(
+        model_name=state.get("model_name"),
+        base_url=state.get("base_url"),
+        api_key=state.get("api_key"),
+        temperature=state.get("temperature", 0.0),
+    )
+    new_summary = summarize_with_model(model, old_summary, history)
+    if not new_summary:  # summarizer failed, skip pruning this round
+        return {}
+    removals = [RemoveMessage(id=m.id) for m in messages[:cutoff] if m.type != "system" and m.id]
+    logger.info("[Compact] absorbed {} msgs - len={}", len(history), len(new_summary))
+    return {"messages": removals, "summary": new_summary}
 
 
 @monitor_node("safety_check_node")
@@ -339,13 +376,15 @@ async def build_vibe_app():
     tool_node = ToolNode(ALL_TOOLS)
 
     workflow = StateGraph(AgentState)
+    workflow.add_node("compact", compact_node)
     workflow.add_node("agent", call_model)
     workflow.add_node("safety_check", safety_check_node)
     workflow.add_node("pend_approval", pend_approval_interrupt_node)
     workflow.add_node("tools", tool_node)
     workflow.add_node("dynamic_diff_node", dynamic_shell_diff_node)
 
-    workflow.set_entry_point("agent")
+    workflow.set_entry_point("compact")
+    workflow.add_edge("compact", "agent")
 
     # 【第一步】agent 执行完后进行条件分流：普通对话直接结束，工具调用进安全检查
     workflow.add_conditional_edges(
@@ -386,7 +425,7 @@ async def build_vibe_app():
         }
     )
 
-    workflow.add_edge("dynamic_diff_node", "agent")
+    workflow.add_edge("dynamic_diff_node", "compact")
 
     return workflow.compile(
         checkpointer=checkpointer
@@ -436,7 +475,7 @@ async def start():
     system_skill_index_prompt = skill_registry.index_content
     print(f"skill:\n{system_skill_index_prompt}")
 
-    system_prompts = [SystemMessage(content=system_vibe_coding_prompt)]
+    system_prompts = [SystemMessage(content=system_vibe_coding_prompt),SystemMessage(content=system_env_shell_prompt)]
 
     if system_struct_prompt and system_struct_prompt.strip():
         system_prompts.append(SystemMessage(content=system_struct_prompt))
@@ -444,11 +483,11 @@ async def start():
     if system_skill_index_prompt and system_skill_index_prompt.strip():
         system_prompts.append(SystemMessage(content=system_skill_index_prompt))
 
-    system_prompts.append(SystemMessage(content=system_env_shell_prompt))
-
     console.print(Panel.fit(
         "🚀 [bold cyan]Local Vibe Coding Assistant (Official Interrupt)[/bold cyan]\n输入你的需求，输入 exit 退出。",
         border_style="cyan"))
+
+    first_round = True
 
     app = await build_vibe_app()
 
@@ -474,7 +513,11 @@ async def start():
                         Panel(Markdown(f"### 🧩 当前已注册的技能清单\n\n{index_content}"), border_style="cyan"))
                 continue  # 拦截成功后直接进入下一轮循环，不走后续的大模型 Agent 流程
 
-            messages = system_prompts + [HumanMessage(content=user_input)]
+            if first_round:  # inject system prompts only on the first turn
+                messages = system_prompts + [HumanMessage(content=user_input)]
+                first_round = False
+            else:  # later turns only append the new user message
+                messages = [HumanMessage(content=user_input)]
 
             # 初始输入流或恢复流
             stream_input = {"model_name": model_name,

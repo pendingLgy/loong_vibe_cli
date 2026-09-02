@@ -44,13 +44,13 @@ vibe-cli\
       │   └─ __init__.py
       │
       └─ workflow\             # LangGraph 工作流
-         ├─ base_workflow.py      # 核心图: StateGraph + 安全审查路由 + 人工审批中断 + 动态 Diff 变更报告 + 读取 struct.md 作为系统提示
+         ├─ base_workflow.py      # 核心图: StateGraph + 安全审查路由 + 人工审批中断 + 动态 Diff 变更报告 + 读取 struct.md 作为系统提示 + 入口 compact 消息压缩
          └─ __init__.py
 ```
 ## 关键流程
 
 1. ``main.run()`` 加载 .env 环境变量后调用 ``workflow.base_workflow.start()``
-2. ``base_workflow`` 构建 StateGraph（5 个节点）：
+2. ``base_workflow`` 构建 StateGraph（6 个节点，含入口 compact 消息压缩节点）：
    - ``agent``：模型生成回复、决定是否调用工具
    - ``safety_check``：对工具调用进行 LLM 安全审查（返回 SafetyCheckResult）
    - ``pend_approval``：高危操作通过 ``interrupt()`` 挂起，等待人工审批
