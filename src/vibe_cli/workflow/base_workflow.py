@@ -16,7 +16,7 @@ from rich.prompt import Confirm
 from vibe_cli.env.check_point_memory import postgres_memory
 from vibe_cli.env.logger_config import logger
 from vibe_cli.model.deepseek_model import AgentState, get_model_by_name
-from vibe_cli.prompt.sys_env_prompt import sys_env_shell_prompt, sys_vibe_coding_agent
+from vibe_cli.prompt.sys_env_prompt import sys_vibe_coding_agent
 from vibe_cli.prompt.sys_safe_check_prompt import sys_safe_check_prompt
 from vibe_cli.skill.loading_skill import SkillRegistry
 from vibe_cli.tools import ALL_TOOLS
@@ -41,7 +41,7 @@ def load_system_struct_prompt() -> str:
         if os.path.exists(struct_path):
             try:
                 with open(struct_path, encoding="utf-8") as f:
-                    logger.success(f"load vcl md successfully from {struct_path}")
+                    logger.success(f"load vcl struct, dir:{struct_path}")
                     return f.read()
             except Exception as e:
                 logger.exception(f"load vcl md error {str(e)}")
@@ -464,18 +464,17 @@ async def start():
     skill_registry = SkillRegistry(skills_dir)
     config = {
         "configurable": {
-            "thread_id": str(uuid.uuid4()),
+            # "thread_id": str(uuid.uuid4()),
+            "thread_id": "123008",
             "skill_registry": skill_registry  # 👈 核心：作为配置传递
         }
     }
 
-    system_vibe_coding_prompt = sys_vibe_coding_agent()
+    system_vibe_coding_prompt = sys_vibe_coding_agent(work_dir)
     system_struct_prompt = load_system_struct_prompt()
-    system_env_shell_prompt = sys_env_shell_prompt(work_dir)
     system_skill_index_prompt = skill_registry.index_content
-    print(f"skill:\n{system_skill_index_prompt}")
 
-    system_prompts = [SystemMessage(content=system_vibe_coding_prompt),SystemMessage(content=system_env_shell_prompt)]
+    system_prompts = [SystemMessage(content=system_vibe_coding_prompt)]
 
     if system_struct_prompt and system_struct_prompt.strip():
         system_prompts.append(SystemMessage(content=system_struct_prompt))
@@ -490,6 +489,18 @@ async def start():
     first_round = True
 
     app = await build_vibe_app()
+    # --- resume check: skip re-injecting system prompts on existing thread ---
+    try:
+        history = [s async for s in app.aget_state_history(config=config,limit=10)]
+        persisted = []
+        for snap in history or []:
+            persisted.extend((snap.values or {}).get('messages') or [])
+        if any(getattr(m, 'type', '') == 'system' for m in persisted):
+            first_round = False
+            logger.info('resume: thread already has SystemMessage, skip re-injection')
+    except Exception as e:
+        logger.exception('state query failed: {}'.format(e))
+        first_round = True
 
     while True:
         try:

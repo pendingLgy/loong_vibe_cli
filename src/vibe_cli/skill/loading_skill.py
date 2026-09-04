@@ -41,6 +41,7 @@ class SkillRegistry:
             try:
                 # 优先从文件内容解析 name，解析不到则降级使用父目录名
                 skill_name = self._parse_skill_name(skill_file) or skill_file.parent.name
+                logger.success(f"load skill: {skill_name} dir:{skill_file}")
                 self.skill_paths[skill_name] = skill_file
             except Exception as e:
                 logger.exception(f"Failed to register skill at {skill_file}: {e}")

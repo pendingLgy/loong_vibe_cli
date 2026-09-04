@@ -1,5 +1,5 @@
 ---
-name: coding_work_plan
+name: plan
 description: 适用于复杂编码、多文件修改、重构或新功能开发时，用于生成包含明确工作目标的结构化工作计划，并持久化保存到当前工作目录下 .vcl/plans/ 目录中的专业指导规范
 ---
 
