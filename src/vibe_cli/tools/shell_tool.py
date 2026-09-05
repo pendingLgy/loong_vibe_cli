@@ -107,9 +107,9 @@ def execute_shell_command(command: str, cwd: str) -> str:
         if not output.strip():
             output = "命令执行成功，无任何输出。"
 
-        MAX_OUTPUT_LENGTH = 2000
-        if len(output) > MAX_OUTPUT_LENGTH:
-            output = output[-MAX_OUTPUT_LENGTH:] + "\n...(内容过长已截断)..."
+        # MAX_OUTPUT_LENGTH = 2000
+        # if len(output) > MAX_OUTPUT_LENGTH:
+        #     output = output[-MAX_OUTPUT_LENGTH:] + "\n...(内容过长已截断)..."
 
         return output
 

@@ -23,7 +23,7 @@ from vibe_cli.tools import ALL_TOOLS
 from vibe_cli.wraps.monitor import monitor_node
 from vibe_cli.message.message_compactor import plan_compaction, summarize_with_model
 
-console = Console()
+SUMMARY_BOOKMARK_PREFIX = "【历史摘要】以下是早期对话的摘要（已压缩省略）：\\n"
 
 
 def load_system_struct_prompt() -> str:
@@ -140,9 +140,6 @@ def call_model(state: AgentState):
     """
 
     messages = state.get("messages", [])
-    summary = state.get("summary") or ""
-    if summary:  # prepend rolling summary once compaction has happened
-        messages = [SystemMessage(content="【历史摘要】以下是早期对话的摘要（已压缩省略）：\n" + summary)] + messages
     response = get_model_by_name(model_name=state.get("model_name"), base_url=state.get("base_url"),
                                  api_key=state.get("api_key"), temperature=state.get("temperature", 0.0)
                                  ).bind_tools(ALL_TOOLS).invoke(messages)
@@ -156,35 +153,76 @@ def call_model(state: AgentState):
 
 @monitor_node("compact_node")
 def compact_node(state):
-    """Message-history compaction node (graph entry).
+    """消息历史压缩节点（图入口）。
 
-    Runs before the agent on every turn. When the accumulated conversation grows
-    beyond the configured threshold, oldest complete turns are absorbed into a
-    rolling LLM summary and pruned via RemoveMessage so the model context stays
-    bounded. On any summarization failure it safely no-ops.
+    在每轮对话开始前运行。当累积的对话超出配置的阈值时，
+    将最旧的完整对话轮次通过大模型归纳为滚动摘要，并通过 RemoveMessage 进行裁剪，
+    从而保持大模型上下文在安全范围内。如果归纳失败，则安全跳过。
     """
     messages = state.get("messages", [])
-    if not messages:  # cold start
+    if not messages:  # 冷启动无消息
         return {}
     threshold = int(os.getenv("compress_threshold_chars", "12000"))
     keep_last = int(os.getenv("compress_keep_last", "12"))
-    old_summary = state.get("summary") or ""
+
+    # 获取由 plan_compaction 返回的起止绝对索引及历史消息
     plan = plan_compaction(messages, keep_last=keep_last, threshold_chars=threshold)
-    if plan is None:  # context is still small enough
+    if plan is None:  # 上下文体积依然在安全范围内，无需压缩
         return {}
-    cutoff, history = plan
+    start_idx, cutoff, history = plan
+
+    # 1. 提取所有匹配的旧摘要内容
+    # 2. 遍历每一行/每一条旧摘要，在末尾拼接逗号 ","
+    # 3. 用换行符连接成一个多行汇总字符串
+    old_summary = "\n".join(
+        f"对话{index},内容：\n{str(m.content)} \n"
+        for index, m in enumerate(messages[start_idx:cutoff], start=start_idx)
+        if m.content
+    )
+
     model = get_model_by_name(
         model_name=state.get("model_name"),
         base_url=state.get("base_url"),
         api_key=state.get("api_key"),
         temperature=state.get("temperature", 0.0),
     )
+
     new_summary = summarize_with_model(model, old_summary, history)
-    if not new_summary:  # summarizer failed, skip pruning this round
+    if not new_summary:  # 摘要生成失败，本轮放弃裁剪以防破坏状态
         return {}
-    removals = [RemoveMessage(id=m.id) for m in messages[:cutoff] if m.type != "system" and m.id]
-    logger.info("[Compact] absorbed {} msgs - len={}", len(history), len(new_summary))
-    return {"messages": removals, "summary": new_summary}
+
+    # 1. 明确待压缩区和保留区
+    history_to_compress = messages[start_idx:cutoff]
+    kept_messages = messages[cutoff:]
+
+    # 2. 移除从 start_idx 开始的【所有】后续消息（防止顺序错乱）
+    removals = [
+        RemoveMessage(id=m.id)
+        for m in messages[start_idx:]
+        if getattr(m, "id", None)
+    ]
+
+    # 3. 构造历史摘要消息
+    summary_msg = HumanMessage(
+        id="summary-" + uuid.uuid4().hex[:8],
+        content=SUMMARY_BOOKMARK_PREFIX + new_summary,
+    )
+
+    # 4. 重新克隆保留区消息（重新赋予新 ID，确保被 LangGraph 识别为全新追加的消息）
+    rebuilt_tail = []
+    for m in kept_messages:
+        clone = m.model_copy(deep=True)
+        clone.id = "keep-" + uuid.uuid4().hex[:8]
+        rebuilt_tail.append(clone)
+
+    logger.info(
+        "[Compact] absorbed {} msgs, rebuilt tail with summary len={}",
+        len(history_to_compress),
+        len(new_summary)
+    )
+
+    # 5. 按严格顺序返回：删除指令 -> 摘要消息 -> 保留的最近消息
+    return {"messages": removals + [summary_msg] + rebuilt_tail}
 
 
 @monitor_node("safety_check_node")
@@ -355,7 +393,7 @@ def dynamic_shell_diff_node(state: AgentState) -> dict:
         formatted_report = f"\n\n{summary_report}"
 
         # 或者作为独立的辅助信息（推荐，避免污染原消息结构）
-        report_msg = HumanMessage(content=f"📂 [自动检测到工作区变更]:{formatted_report}")
+        report_msg = SystemMessage(content=f"📂 [自动检测到工作区变更]:{formatted_report}")
         return {
             "requires_approval": False,
             "node_status": "normal",
@@ -425,7 +463,7 @@ async def build_vibe_app():
         }
     )
 
-    workflow.add_edge("dynamic_diff_node", "compact")
+    workflow.add_edge("dynamic_diff_node", "agent")
 
     return workflow.compile(
         checkpointer=checkpointer
@@ -433,6 +471,7 @@ async def build_vibe_app():
 
 
 # ==================== 终端 REPL 交互主循环 ====================
+console = Console()
 
 async def start():
     model_name = os.getenv("model_name")
@@ -465,7 +504,7 @@ async def start():
     config = {
         "configurable": {
             # "thread_id": str(uuid.uuid4()),
-            "thread_id": "123008",
+            "thread_id": "123012",
             "skill_registry": skill_registry  # 👈 核心：作为配置传递
         }
     }
