@@ -55,4 +55,3 @@ from vibe_cli.workflow.base_workflow import start
 
 def run() -> None:
     start()
-    logger.success("started")
