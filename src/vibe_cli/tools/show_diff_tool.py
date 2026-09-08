@@ -31,6 +31,7 @@ def cleanup_temp_files():
         except Exception:
             pass
 
+    logger.info("临时文件已清理")
 
 def __git_head_content(repo_dir: Path, rel_path: str) -> bytes | None:
     """Read original content of file at Git HEAD; return None when unavailable."""
