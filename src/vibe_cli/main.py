@@ -1,4 +1,3 @@
-import asyncio
 import os
 import sys
 from pathlib import Path
@@ -50,15 +49,10 @@ if env_file is not None:
 else:
     print("[Config] 未找到环境配置文件，将直接读取系统环境变量。")
 
-from vibe_cli.workflow.base_workflow import start
 from vibe_cli.env.logger_config import logger
+from vibe_cli.workflow.base_workflow import start
 
 
 def run() -> None:
-    # 关键：在 Windows 下强制切换事件循环策略为 SelectorEventLoop
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
-    asyncio.run(start())
-
+    start()
     logger.success("started")

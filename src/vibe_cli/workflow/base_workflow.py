@@ -255,7 +255,7 @@ def safety_check_node(state: AgentState):
             response = get_model_by_name(model_name=state.get("model_name"), base_url=state.get("base_url"),
                                          api_key=state.get("api_key"), temperature=state.get("temperature", 0.0)
                                          ).invoke([HumanMessage(content=prompt)])
-            response_text = response.content.strip()
+            response_text = response.text.strip()
 
             # 清理可能存在的 markdown 代码块符号 (```json ... ```)
             if response_text.startswith("```json"):
@@ -268,7 +268,7 @@ def safety_check_node(state: AgentState):
             reason = result_dict.get("reason", "无原因说明")
             file = result_dict.get("file", "")
 
-            logger.info(f"LLM 安全检查结果: \nis_dangerous={is_dangerous} \n原因: {reason} \nfile: {file}")
+            logger.info(f"LLM 安全检查结果: is_dangerous={is_dangerous} 原因: {reason} file: {file}")
         except Exception as e:
             logger.exception(f"LLM 安全检查解析失败: {e}，默认按安全处理")
             is_dangerous = False
@@ -288,7 +288,7 @@ def safety_check_node(state: AgentState):
             )
 
             # 将警告提示追加到当前 AI 消息的 content 中
-            last_message.content = (last_message.content or "") + "\n\n" + warning_text
+            last_message.content = (last_message.text or "") + "\n\n" + warning_text
 
             return {
                 "requires_approval": True,
@@ -386,7 +386,7 @@ def dynamic_shell_diff_node(state: AgentState) -> dict:
             temperature=state.get("temperature", 0.0)
         ).invoke(prompt)
 
-        summary_report = response.content.strip()
+        summary_report = response.text
         if not summary_report:
             return {}
 
@@ -408,8 +408,8 @@ def dynamic_shell_diff_node(state: AgentState) -> dict:
         }
 
 
-async def build_vibe_app():
-    checkpointer = await postgres_memory()
+def build_vibe_app():
+    checkpointer = postgres_memory()
 
     tool_node = ToolNode(ALL_TOOLS)
 
@@ -471,9 +471,8 @@ async def build_vibe_app():
 
 
 # ==================== 终端 REPL 交互主循环 ====================
-console = Console()
 
-async def start():
+def start():
     model_name = os.getenv("model_name")
     base_url = os.getenv("url")
     api_key = os.getenv("api_key")
@@ -498,13 +497,14 @@ async def start():
             f"以下环境变量不能为空: {', '.join(missing_fields)}"
         )
 
+
     # 例如在环境变量和 work_dir 准备好之后：
     skills_dir = Path(work_dir).joinpath(".vcl", "skills")
     skill_registry = SkillRegistry(skills_dir)
     config = {
         "configurable": {
             # "thread_id": str(uuid.uuid4()),
-            "thread_id": "123012",
+            "thread_id": "123021",
             "skill_registry": skill_registry  # 👈 核心：作为配置传递
         }
     }
@@ -521,16 +521,18 @@ async def start():
     if system_skill_index_prompt and system_skill_index_prompt.strip():
         system_prompts.append(SystemMessage(content=system_skill_index_prompt))
 
+    console = Console()
+
     console.print(Panel.fit(
         "🚀 [bold cyan]Local Vibe Coding Assistant (Official Interrupt)[/bold cyan]\n输入你的需求，输入 exit 退出。",
         border_style="cyan"))
 
     first_round = True
 
-    app = await build_vibe_app()
+    app = build_vibe_app()
     # --- resume check: skip re-injecting system prompts on existing thread ---
     try:
-        history = [s async for s in app.aget_state_history(config=config,limit=10)]
+        history = [s for s in app.get_state_history(config=config,limit=10)]
         persisted = []
         for snap in history or []:
             persisted.extend((snap.values or {}).get('messages') or [])
@@ -578,46 +580,55 @@ async def start():
                             "messages": messages}
 
             while True:
-                # 驱动图执行
-                has_interrupt = False
-                async for event in app.astream(stream_input, config=config, stream_mode="updates"):
-                    for node_name, output in event.items():
-                        if node_name == "agent":
-                            msg = output["messages"][-1]
-                            if msg.content:
-                                console.print(Markdown(f"\n🤖 **Agent 思考/回复**:\n{msg.content}"))
-                            if getattr(msg, "tool_calls", None):
-                                for tc in msg.tool_calls:
-                                    console.print(
-                                        f"[dim]🛠️ 准备调用工具: [bold]{tc['name']}[/bold] 参数: {tc['args']}[/dim]")
 
-                        elif node_name == "tools":
-                            msg = output["messages"][-1]
-                            console.print(f"[dim]✅ 工具执行返回: {msg.content}[/dim]")
+                # 1. 异步唤起并获取 v3 AsyncGraphRunStream 控制器
+                stream = app.stream_events(input=stream_input, config=config, version="v3")
 
-                # 检查当前图是否因为节点的 interrupt() 而暂停
-                snapshot = await app.aget_state(config)
-                if snapshot.tasks and any(task.interrupts for task in snapshot.tasks):
-                    has_interrupt = True
-                    # 提取 interrupt 传出来的数据
-                    interrupt_data = snapshot.tasks[0].interrupts[0].value
+                console.print("\n[bold green]🤖 Agent 响应中...[/bold green]")
 
-                    console.print(Panel(
-                        f"⚠️ [bold yellow]安全警报：Agent 准备执行高危操作！[/bold yellow]\n详情: {interrupt_data}",
-                        border_style="yellow"
-                    ))
+                # -------------------------------------------------------------
+                # 2. 消费 stream.messages 投影：极简打字机（无需解包底层的 event 结构）
+                # -------------------------------------------------------------
+                for message in stream.messages:
+                    node = message.node
+                    if node != 'agent':
+                        continue
 
-                    if Confirm.ask("是否批准执行该操作？", default=True):
-                        console.print("[green]✅ 批准执行，唤醒 Agent 中...[/green]")
-                        # 🟢 官方标准恢复：使用 Command(resume="approved")
+                    for text in message.text:
+                        console.print(text, end="")
+
+                    console.print()  # 换行
+
+                # -------------------------------------------------------------
+                # 3. 中断处理 (Human-in-the-Loop)
+                # -------------------------------------------------------------
+                if stream.interrupted:
+                    console.print("\n[bold yellow]⏸️ 触发安全拦截，等待用户授权...[/bold yellow]")
+
+                    # 从 stream.interrupts 提取具体的审批 Payload
+                    for interrupt_payload in stream.interrupts:
+                        console.print(
+                            Panel(
+                                f"⚠️ [bold yellow]敏感操作需要确认：[/bold yellow]\n{interrupt_payload.value}",
+                                title="人机协作审批 (HITL)",
+                                border_style="yellow",
+                            )
+                        )
+
+                    # 终端交互确认
+                    if Confirm.ask("是否批准 Agent 继续执行此操作？", default=True):
+                        console.print("[green]✅ 已批准，恢复 Agent 执行...[/green]")
+                        # 传入 Command 响应恢复信号
                         stream_input = Command(resume="approved")
                     else:
-                        console.print("[red]❌ 已拒绝该操作。[/red]")
-                        # 🔴 官方标准恢复：使用 Command(resume="rejected")
+                        console.print("[red]❌ 已拒绝操作，中断流程。[/red]")
                         stream_input = Command(resume="rejected")
 
-                if not has_interrupt:
-                    break  # 如果没有触发中断，说明本轮对话正常结束，跳出内层 while 循环等待下一次用户输入
+                    # 继续下一次 while 循环以推进恢复后的图任务
+                    continue
+                # 没有被中断，说明全部流程已经执行完毕，退出控制循环
+                break
+
 
         except KeyboardInterrupt:
             console.print("\n[yellow]操作已中断。[/yellow]")

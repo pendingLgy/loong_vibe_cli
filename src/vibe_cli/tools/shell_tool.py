@@ -80,7 +80,7 @@ def execute_shell_command(command: str, cwd: str) -> str:
     if not os.path.exists(target_cwd) or not os.path.isdir(target_cwd):
         return f"错误: 用户指定的路径 '{target_cwd}'（原始输入: {cwd}）在本地不存在或不是一个有效的目录。"
 
-    logger.info(f"\n⚡ [Vibe Coding 终端执行] dir:{target_cwd} 正在运行命令: {command}")
+    logger.info(f"⚡ [Vibe Coding 终端执行] dir:{target_cwd} 正在运行命令: {command}")
 
     try:
         # 使用 subprocess 运行命令

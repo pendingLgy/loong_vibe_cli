@@ -17,12 +17,13 @@ vibe-cli\
 ├─ tests\                      # pytest 测试(消息压缩单元测试 + 图级集成测试, 共 26 例)
 ├─ src\
    ├─ vibe_cli\                # 主包
-      ├─ main.py               # 程序入口: 加载 .env 配置、Windows 事件循环、启动 workflow
+      ├─ main.py               # 程序入口: 加载 .env 配置、同步启动 workflow(REPL)
       ├─ __init__.py           # 命令行脚本入口, 暴露 main()
       |
       ├─ env\                  # 运行环境基础设施
-      |   ├─ check_point_memory.py   # PostgreSQL Checkpointer(LangGraph 持久化、断点恢复)
+      |   ├─ check_point_memory.py   # PostgreSQL Checkpointer(同步 PostgresSaver 单例、ConnectionPool、断点恢复、close_postgres_memory 关闭)
       |   ├─ logger_config.py        # loguru 日志配置(控制台 + 文件, 目录可配置)
+      |   ├─ shutdown.py              # 优雅关闭: atexit 注册 + SIGINT、SIGTERM 信号捕获, 关闭 PG 连接池并清理临时文件
       |   ├─ __init__.py
       |
       ├─ message\              # 消息压缩模块
@@ -55,13 +56,13 @@ vibe-cli\
       |   ├─ __init__.py
       |
       ├─ workflow\             # LangGraph 工作流
-         ├─ base_workflow.py      # 核心图: 6 节点(compact 入口、agent、safety_check、tools、dynamic_diff_node) + 条件路由 + 人工审批中断 + 动态 Diff + 消息压缩 + 读取 struct.md 作为系统提示
+         ├─ base_workflow.py      # 同步核心图: 6 节点(compact 入口、agent、safety_check、tools、dynamic_diff_node) + 条件路由 + 人工审批中断(stream_events v3 HITL) + 动态 Diff + 消息压缩 + 读取 struct.md 作为系统提示
          ├─ __init__.py
 ```
 
 ## 关键流程
 
-1. main.run() 加载 .env 环境变量后调用 workflow.base_workflow.start()
+1. main.run() 加载 .env 环境变量后同步调用 workflow.base_workflow.start()
 2. base_workflow 构建 StateGraph(6 个节点, 入口为 compact 消息压缩节点):
    - compact: 入口节点, 按需执行消息压缩(plan_compaction + summarize_with_model)
    - agent: 模型生成回复、决定是否调用工具
@@ -72,9 +73,9 @@ vibe-cli\
 3. 入口 compact 仅负责压缩, 不注入摘要消息; 工具执行完成后回到 agent 循环
 4. 消息压缩流程: safe_cutoff 计算起止绝对索引 -> 旧摘要折叠成 old_summary -> summarize_with_model 生成新摘要 -> RemoveMessage 删除旧消息 + HumanMessage(summary-* 书签) + keep-* 克隆重建保留尾部
 5. 工具执行后由 route_check_mutation 基于用户意图(diff、变更、git status 等关键词)决定是否触发动态 Diff
-6. 高风险操作通过 interrupt() 挂起, 外部 CLI 使用 Command(resume=approved|rejected) 恢复
+6. 高风险操作通过 interrupt() 挂起; REPL 由 stream_events(v3) 驱动打字机流, 检测到 stream.interrupted 时读取 stream.interrupts 展示审批信息, 用户确认后以 Command(resume=approved|rejected) 恢复
 7. 模型由 deepseek_model.get_model_by_name 创建(支持 deepseek-chat 等)
-8. 对话消息通过 PostgreSQL Checkpointer 持久化, 支持断点续跑(thread_id 恢复上下文)
+8. 对话消息通过同步 PostgreSQL Checkpointer(单例 ConnectionPool)持久化, 支持断点续跑(thread_id 恢复上下文)
 9. 本文件 struct.md 会被 base_workflow.load_system_struct_prompt() 读取作为系统提示词, 帮助 AI 理解项目结构
 
 ## 安全机制
@@ -84,4 +85,4 @@ vibe-cli\
 - 所有节点由 wraps.monitor 的 monitor_node 装饰器监控, 记录节点耗时与成败日志
 - sys_env_prompt.sys_env_shell_prompt(work_dir) 在提示词层面对模型进行跨平台适配引导与工作区越权约束, 与 workspace_security 装饰器形成双层防线
 - route_check_mutation 基于用户输入中的 diff、变更意图关键词触发动态 Diff, 无相关意图时跳过节点, 减少无谓工具调用
-- show_diff_tool.py 拉起 IDEA diff 对比文件与 Git HEAD, 临时 HEAD 文件存于 .vcl 下 .idea_diff, 程序退出时自动清理
+- show_diff_tool.py 拉起 IDEA diff 对比文件与 Git HEAD, 临时 HEAD 文件存于 .vcl 下 .idea_diff, 程序退出时自动清理 (shutdown.py 注册 atexit + 信号捕获)

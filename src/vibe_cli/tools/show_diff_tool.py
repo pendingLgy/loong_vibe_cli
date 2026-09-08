@@ -14,7 +14,7 @@ from vibe_cli.env.logger_config import logger
 _TEMP_FILES_TO_CLEAN = set()
 
 
-def _cleanup_temp_files():
+def cleanup_temp_files():
     """程序退出时自动清理生成的临时 HEAD 文件和空目录"""
     for file_path in list(_TEMP_FILES_TO_CLEAN):
         try:
@@ -30,10 +30,6 @@ def _cleanup_temp_files():
                 p.rmdir()
         except Exception:
             pass
-
-
-# 注册退出清理钩子
-atexit.register(_cleanup_temp_files)
 
 
 def __git_head_content(repo_dir: Path, rel_path: str) -> bytes | None:

@@ -20,10 +20,10 @@ vibe-cli\
 ├─ tests\                      # pytest 测试(消息压缩: 16 单元 + 10 集成, 共 26 例)
 ├─ src\
    ├─ vibe_cli\                # 主包
-      ├─ main.py               # 程序入口: 加载 .env 配置、Windows 事件循环、启动 workflow
+      ├─ main.py               # 程序入口: 加载 .env 配置、同步启动 workflow(REPL)
       ├─ __init__.py           # 命令行脚本入口, 暴露 main()
       |
-      ├─ env\                  # 运行环境基础设施: check_point_memory(PostgreSQL Checkpointer)、logger_config(loguru)
+      ├─ env\                  # 运行环境基础设施: check_point_memory(同步 PostgreSQL Checkpointer)、logger_config(loguru)、shutdown(优雅关闭: atexit+信号捕获关闭 PG 池与清理临时文件)
       ├─ message\              # 消息压缩核心(message_compactor.py: 阈值判断、安全切分、plan、模型摘要, 无 2000 硬截断)
       ├─ model\                # 模型与状态定义: AgentState、SafetyCheckResult、get_model_by_name
       ├─ prompt\               # 提示词模板: 安全审查、跨平台 Shell、Vibe Coding、消息压缩摘要
@@ -36,7 +36,7 @@ vibe-cli\
 ## 持久化说明
 
 对话状态通过 PostgreSQL Checkpointer 保存，重启后可使用 thread_id 恢复上下文。
-数据库连接由 database_url 配置，首次运行会自动建表。
+持久化采用同步 PostgresSaver + ConnectionPool(模块级单例), 退出前可调 close_postgres_memory() 关闭连接池(程序退出时由 shutdown.py 注册 atexit 与 SIGINT、SIGTERM 自动执行); database_url 使用 postgresql:// 协议(psycopg 同步驱动), 首次运行自动建表。
 
 ## 测试
 
@@ -92,13 +92,15 @@ uv tool install .       # 全局安装命令行工具
 | api_key | 模型 API 密钥（对应 AgentState.api_key） | sk-xxxxxxxx |
 | temperature | 采样温度，默认 0.0 | 0.0 |
 | logger.dir | 日志输出目录（logs\） | 绝对路径 |
-| database_url | PostgreSQL 连接串（LangGraph Checkpointer 持久化） | postgresql+asyncpg//user:pass@localhost:5432/vibe_cli |
+| database_url | PostgreSQL 连接串（LangGraph Checkpointer 持久化, psycopg 同步） | postgresql://user:pass@localhost:5432/vibe_cli |
 | work_dir | 工作区根目录（enforce_workspace_security 装饰器的权限边界） | 绝对路径 |
 | compress_threshold_chars | 消息压缩触发阈值（非系统消息总字符数超限即压缩，默认 12000） | 12000 |
 | compress_keep_last | 消息压缩保留的最近消息条数（默认 12） | 12 |
+| IDEA_HOME | IDEA 可执行文件路径（show_diff_tool 拉起 diff 对比） | 绝对路径 |
+| LANGSMITH_* | LangSmith 链路观测(TRACING、ENDPOINT、API_KEY、PROJECT) | 参考 .env |
 
 说明：
 
 1. main.py 查找顺序：当前工作目录 -> 项目根目录，优先加载 .env.{APP_ENV}，其次加载 .env，都没有则直接读取系统环境变量。
-2. database_url 需为 asyncpg 协议（postgresql+asyncpg//），首次运行会自动建表。
+2. database_url 使用 psycopg 同步协议（postgresql://，非 asyncpg），首次运行会自动建表。
 3. work_dir 决定 shell 工具可访问的目录边界，cwd 或 command 中的路径越权会被拦截。
