@@ -59,10 +59,16 @@ uv run pytest tests -v
 uv run pytest tests --cov --cov-report=term-missing
 ```
 
+## 启动
+```bash
+uv run vibe-cli
+```
+
+
 ## 常用 uv 命令
 
 | 命令 | 说明 |
-| ---- | ---- | ---- |
+| ---- | ---- |
 | uv sync | 根据 pyproject.toml + uv.lock 安装依赖到虚拟环境 |
 | uv add 包名 | 添加依赖并更新 lock 文件 |
 | uv remove 包名 | 移除依赖 |
