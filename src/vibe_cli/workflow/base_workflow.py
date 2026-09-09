@@ -2,10 +2,11 @@ import json
 import os
 import uuid
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Any
 
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langgraph.graph import StateGraph, END
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command, interrupt
 from rich.console import Console
@@ -15,39 +16,17 @@ from rich.prompt import Confirm
 
 from vibe_cli.env.check_point_memory import postgres_memory
 from vibe_cli.env.logger_config import logger
-from vibe_cli.model.deepseek_model import AgentState, get_model_by_name
-from vibe_cli.prompt.sys_env_prompt import sys_vibe_coding_agent
+from vibe_cli.message.message_compactor import plan_compaction, summarize_with_model
+from vibe_cli.model.model_factory import get_model
+from vibe_cli.prompt.sys_diff_prompt import diff_prompt
 from vibe_cli.prompt.sys_safe_check_prompt import sys_safe_check_prompt
 from vibe_cli.skill.loading_skill import SkillRegistry
-from vibe_cli.tools import ALL_TOOLS
+from vibe_cli.tools import ALL_TOOLS, DANGEROUS_TOOLS
+from vibe_cli.workflow.load_sys_prompt import sync_system_prompts
+from vibe_cli.workflow.node_state import AgentState
 from vibe_cli.wraps.monitor import monitor_node
-from vibe_cli.message.message_compactor import plan_compaction, summarize_with_model
 
 SUMMARY_BOOKMARK_PREFIX = "【历史摘要】以下是早期对话的摘要（已压缩省略）：\\n"
-
-
-def load_system_struct_prompt() -> str:
-    # 1. 优先从当前工作目录 (work_dir 或 os.getcwd()) 下的 .vcl 目录中读取 struct.md
-    work_dir = os.getenv("work_dir") or os.getcwd()
-
-    candidates = [
-        os.path.join(work_dir, ".vcl", "struct.md"),
-    ]
-
-    # 2. 如果需要保留对项目根目录的兜底，可以在这里继续添加备选路径
-    # project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-    # candidates.append(os.path.join(project_root, "struct.md"))
-    for struct_path in candidates:
-        if os.path.exists(struct_path):
-            try:
-                with open(struct_path, encoding="utf-8") as f:
-                    logger.success(f"load vcl struct, dir:{struct_path}")
-                    return f.read()
-            except Exception as e:
-                logger.exception(f"load vcl md error {str(e)}")
-                continue
-
-    return ""
 
 
 def route_agent(state: AgentState) -> Literal["safety_check_path", "end_path"]:
@@ -140,9 +119,7 @@ def call_model(state: AgentState):
     """
 
     messages = state.get("messages", [])
-    response = get_model_by_name(model_name=state.get("model_name"), base_url=state.get("base_url"),
-                                 api_key=state.get("api_key"), temperature=state.get("temperature", 0.0)
-                                 ).bind_tools(ALL_TOOLS).invoke(messages)
+    response = get_model(provider=state.get("model_provider")).bind_tools(ALL_TOOLS).invoke(messages)
 
     return {
         "messages": [response],
@@ -151,8 +128,8 @@ def call_model(state: AgentState):
     }
 
 
-@monitor_node("compact_node")
-def compact_node(state):
+@monitor_node("compact_msg_node")
+def compact_msg_node(state):
     """消息历史压缩节点（图入口）。
 
     在每轮对话开始前运行。当累积的对话超出配置的阈值时，
@@ -163,10 +140,10 @@ def compact_node(state):
     if not messages:  # 冷启动无消息
         return {}
     threshold = int(os.getenv("compress_threshold_chars", "12000"))
-    keep_last = int(os.getenv("compress_keep_last", "12"))
+    keep_last_turns = int(os.getenv("compress_keep_last_turns", "3"))
 
     # 获取由 plan_compaction 返回的起止绝对索引及历史消息
-    plan = plan_compaction(messages, keep_last=keep_last, threshold_chars=threshold)
+    plan = plan_compaction(messages, keep_last_turns=keep_last_turns, threshold_chars=threshold)
     if plan is None:  # 上下文体积依然在安全范围内，无需压缩
         return {}
     start_idx, cutoff, history = plan
@@ -180,12 +157,7 @@ def compact_node(state):
         if m.content
     )
 
-    model = get_model_by_name(
-        model_name=state.get("model_name"),
-        base_url=state.get("base_url"),
-        api_key=state.get("api_key"),
-        temperature=state.get("temperature", 0.0),
-    )
+    model = get_model(provider=state.get("model_provider"))
 
     new_summary = summarize_with_model(model, old_summary, history)
     if not new_summary:  # 摘要生成失败，本轮放弃裁剪以防破坏状态
@@ -206,6 +178,7 @@ def compact_node(state):
     summary_msg = HumanMessage(
         id="summary-" + uuid.uuid4().hex[:8],
         content=SUMMARY_BOOKMARK_PREFIX + new_summary,
+        additional_kwargs={"is_summary": True}
     )
 
     # 4. 重新克隆保留区消息（重新赋予新 ID，确保被 LangGraph 识别为全新追加的消息）
@@ -240,8 +213,13 @@ def safety_check_node(state: AgentState):
     last_message = messages[-1]
 
     # 检查是否为 AIMessage，包含工具调用，且状态不是挂起审批
-    if isinstance(last_message, AIMessage) and last_message.tool_calls and state.get(
-            "node_status") != "pend_approval":
+    if (
+            isinstance(last_message, AIMessage)
+            and last_message.tool_calls
+            and state.get("node_status") != "pend_approval"
+            # 确保当前调用的所有工具名称，都不在危险工具列表中
+            and not any(tc.get("name") in DANGEROUS_TOOLS for tc in last_message.tool_calls)
+    ):
 
         if not last_message.content:
             logger.info("检测到最后一条 AI 消息的 content 为空（纯工具调用）")
@@ -252,9 +230,7 @@ def safety_check_node(state: AgentState):
 
         try:
             # 直接调用标准支持模型
-            response = get_model_by_name(model_name=state.get("model_name"), base_url=state.get("base_url"),
-                                         api_key=state.get("api_key"), temperature=state.get("temperature", 0.0)
-                                         ).invoke([HumanMessage(content=prompt)])
+            response = get_model(provider=state.get("model_provider")).invoke([HumanMessage(content=prompt)])
             response_text = response.text.strip()
 
             # 清理可能存在的 markdown 代码块符号 (```json ... ```)
@@ -360,31 +336,17 @@ def dynamic_shell_diff_node(state: AgentState) -> dict:
     try:
 
         # 3. 让 LLM 专注于总结变更内容
-        logger.info("🧠 [Git Diff Node] 正在请求 LLM 总结变更内容...")
+        logger.info("[Git Diff Node] 正在请求 LLM 总结变更内容...")
 
         prompt = [
-            SystemMessage(content=(
-                "你是一个专业的技术文档与代码审计专家。\n"
-                "下面提供了当前项目通过 Git 获取到的文件状态和详细 Diff。\n"
-                "请你为用户生成一份结构清晰的【工作区文件变更汇总报告】。\n\n"
-                "【严格规范要求】：\n"
-                "1. 如果没有任何实质性变更，请返回空字符串。\n"
-                "2. 必须将所有文件路径转换为基于当前工作区的**完整绝对路径**。\n"
-                "3. 对于编辑（Modify）或删除（Delete）操作，必须结合 Diff 中的 @@ 块信息指出其**代码行号范围**（例如 Lines 10-15）。\n"
-                "4. 保持格式整洁，使用 Markdown 格式展现（包含新增、修改、删除分类以及 diff 代码块）。"
-            )),
+            SystemMessage(content=(diff_prompt())),
             HumanMessage(content=(
                 f"当前工作区绝对路径: {cwd}\n\n"
                 f"--- 变更内容 ---\n{last_message}\n\n"
             ))
         ]
 
-        response = get_model_by_name(
-            model_name=state.get("model_name"),
-            base_url=state.get("base_url"),
-            api_key=state.get("api_key"),
-            temperature=state.get("temperature", 0.0)
-        ).invoke(prompt)
+        response = get_model(provider=state.get("model_provider")).invoke(prompt)
 
         summary_report = response.text
         if not summary_report:
@@ -414,15 +376,15 @@ def build_vibe_app():
     tool_node = ToolNode(ALL_TOOLS)
 
     workflow = StateGraph(AgentState)
-    workflow.add_node("compact", compact_node)
+    workflow.add_node("compact_msg", compact_msg_node)
     workflow.add_node("agent", call_model)
     workflow.add_node("safety_check", safety_check_node)
     workflow.add_node("pend_approval", pend_approval_interrupt_node)
     workflow.add_node("tools", tool_node)
     workflow.add_node("dynamic_diff_node", dynamic_shell_diff_node)
 
-    workflow.set_entry_point("compact")
-    workflow.add_edge("compact", "agent")
+    workflow.set_entry_point("compact_msg")
+    workflow.add_edge("compact_msg", "agent")
 
     # 【第一步】agent 执行完后进行条件分流：普通对话直接结束，工具调用进安全检查
     workflow.add_conditional_edges(
@@ -470,21 +432,31 @@ def build_vibe_app():
     )
 
 
+def create_workflow_img(app: CompiledStateGraph[Any, Any, Any, Any]):
+    try:
+        # 1. 获取工作目录，如果没有设置则默认使用当前运行目录
+        target_dir = os.getenv("work_dir") or os.getcwd()
+        output_path = Path(target_dir).joinpath("vibe_agent_workflow.png")
+
+        # 2. 生成并保存图片
+        png_data = app.get_graph().draw_mermaid_png()
+        with open(output_path, "wb") as f:
+            f.write(png_data)
+
+        logger.success(f"[green]✅ 已成功生成流程图图片: {output_path}[/green]")
+    except Exception as e:
+        logger.warning(f"生成 PNG 流程图失败: {e}")
+
+
 # ==================== 终端 REPL 交互主循环 ====================
 
 def start():
-    model_name = os.getenv("model_name")
-    base_url = os.getenv("url")
-    api_key = os.getenv("api_key")
-    temperature = os.getenv("temperature", 0.0)
     work_dir = os.getenv("work_dir")
+    model_provider = os.getenv("model_provider")
 
     required_fields = {
-        "model_name": model_name,
-        "base_url": base_url,
-        "api_key": api_key,
-        "temperature": temperature,
         "work_dir": work_dir,
+        "model_provider": model_provider,
     }
 
     missing_fields = [
@@ -497,51 +469,27 @@ def start():
             f"以下环境变量不能为空: {', '.join(missing_fields)}"
         )
 
-
     # 例如在环境变量和 work_dir 准备好之后：
     skills_dir = Path(work_dir).joinpath(".vcl", "skills")
     skill_registry = SkillRegistry(skills_dir)
+
     config = {
         "configurable": {
             # "thread_id": str(uuid.uuid4()),
-            "thread_id": "123021",
-            "skill_registry": skill_registry  # 👈 核心：作为配置传递
+            "thread_id": "123025",
+            "skill_registry": skill_registry
         }
     }
 
-    system_vibe_coding_prompt = sys_vibe_coding_agent(work_dir)
-    system_struct_prompt = load_system_struct_prompt()
-    system_skill_index_prompt = skill_registry.index_content
+    app = build_vibe_app()
 
-    system_prompts = [SystemMessage(content=system_vibe_coding_prompt)]
-
-    if system_struct_prompt and system_struct_prompt.strip():
-        system_prompts.append(SystemMessage(content=system_struct_prompt))
-
-    if system_skill_index_prompt and system_skill_index_prompt.strip():
-        system_prompts.append(SystemMessage(content=system_skill_index_prompt))
+    create_workflow_img(app)
+    sync_system_prompts(app, config, skill_registry, work_dir)
 
     console = Console()
-
     console.print(Panel.fit(
         "🚀 [bold cyan]Local Vibe Coding Assistant (Official Interrupt)[/bold cyan]\n输入你的需求，输入 exit 退出。",
         border_style="cyan"))
-
-    first_round = True
-
-    app = build_vibe_app()
-    # --- resume check: skip re-injecting system prompts on existing thread ---
-    try:
-        history = [s for s in app.get_state_history(config=config,limit=10)]
-        persisted = []
-        for snap in history or []:
-            persisted.extend((snap.values or {}).get('messages') or [])
-        if any(getattr(m, 'type', '') == 'system' for m in persisted):
-            first_round = False
-            logger.info('resume: thread already has SystemMessage, skip re-injection')
-    except Exception as e:
-        logger.exception('state query failed: {}'.format(e))
-        first_round = True
 
     while True:
         try:
@@ -565,19 +513,8 @@ def start():
                         Panel(Markdown(f"### 🧩 当前已注册的技能清单\n\n{index_content}"), border_style="cyan"))
                 continue  # 拦截成功后直接进入下一轮循环，不走后续的大模型 Agent 流程
 
-            if first_round:  # inject system prompts only on the first turn
-                messages = system_prompts + [HumanMessage(content=user_input)]
-                first_round = False
-            else:  # later turns only append the new user message
-                messages = [HumanMessage(content=user_input)]
-
             # 初始输入流或恢复流
-            stream_input = {"model_name": model_name,
-                            "base_url": base_url,
-                            "api_key": api_key,
-                            "temperature": temperature,
-                            "work_dir": work_dir,
-                            "messages": messages}
+            stream_input = {"model_provider": model_provider, "work_dir": work_dir, "messages": [HumanMessage(content=user_input)]}
 
             while True:
 

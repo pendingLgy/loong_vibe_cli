@@ -1,9 +1,24 @@
-"""Message compaction helpers for vibe-cli."""
+"""Message compaction helpers for vibe-cli (Turn-based Compaction)."""
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 DEFAULT_THRESHOLD_CHARS = 12000
-DEFAULT_KEEP_LAST = 12
+DEFAULT_KEEP_LAST_TURNS = 3  # 默认保留最近 3 轮完整对话
+
+
+def is_summary_message(msg) -> bool:
+    """判断一条消息是否为压缩生成的历史摘要消息"""
+    # 1. 优先校验 additional_kwargs 中的标记
+    additional_kwargs = getattr(msg, "additional_kwargs", {}) or {}
+    if additional_kwargs.get("is_summary") is True:
+        return True
+
+    # 2. 保留对 id 或 content 前缀的降级防御
+    msg_id = str(getattr(msg, "id", ""))
+    if msg_id.startswith("summary-"):
+        return True
+
+    return False
 
 
 def total_size(messages):
@@ -11,127 +26,125 @@ def total_size(messages):
     return sum(len(str(m.content)) for m in messages if m.type != "system")
 
 
-def should_compress(messages, keep_last=DEFAULT_KEEP_LAST, threshold_chars=DEFAULT_THRESHOLD_CHARS):
-    """Return True when history is big enough and has something to prune."""
-    non_system = [m for m in messages if m.type != "system"]
-    if len(non_system) <= keep_last:  # too few messages to bother
+def split_into_turns(messages):
+    """将消息列表解析为轮次区间 [(turn_start_idx, turn_end_idx), ...]。
+
+    规则：
+    1. 遇到第一条真正的 HumanMessage（非摘要）才启动轮次计算。
+    2. 一轮 Turn 以 HumanMessage 为起点，之后跟随的所有消息（AI、Tool、中途插入的 SystemMessage）
+       全部归入该轮次。
+    3. 历史摘要消息 (is_summary=True) 被当作背景信息，不会触发新 Turn 计算。
+    """
+    turns = []
+    current_turn_start = None
+
+    for idx, m in enumerate(messages):
+
+        # 遇真正的 HumanMessage（且非历史摘要消息），开启/切分轮次
+        if isinstance(m, HumanMessage) and not is_summary_message(m):
+            if current_turn_start is not None:
+                turns.append((current_turn_start, idx))
+            current_turn_start = idx
+            continue
+
+        # 在遇到第一条真正的 HumanMessage 之前，忽略前置消息（如全局 SystemMessage 或旧摘要）
+        if current_turn_start is None:
+            continue
+
+        # 一旦轮次启动，后续的所有非 Human 消息（包括中途插入的 SystemMessage）全部归入当前轮次
+
+    # 收尾最后一轮
+    if current_turn_start is not None and current_turn_start < len(messages):
+        turns.append((current_turn_start, len(messages)))
+
+    return turns
+
+
+def should_compress(messages, keep_last_turns=DEFAULT_KEEP_LAST_TURNS, threshold_chars=DEFAULT_THRESHOLD_CHARS):
+    """Return True when history is big enough and has enough turns to prune."""
+    turns = split_into_turns(messages)
+    if len(turns) <= keep_last_turns:  # 轮次不足以压缩
         return False
-    if total_size(non_system) <= threshold_chars:  # still cheap
+    if total_size(messages) <= threshold_chars:  # 字符量尚未超标
         return False
     return True
 
 
-def safe_cutoff(messages, keep_last=DEFAULT_KEEP_LAST):
-    """计算安全截断的起止绝对索引。
+def safe_cutoff(messages, keep_last_turns=DEFAULT_KEEP_LAST_TURNS):
+    """按轮次计算安全截断的起止绝对索引。
 
     返回 (start_idx, cutoff)：
-    - start_idx: 待压缩历史的起始位置（精准对齐到第一条非系统消息，并防呆处理左侧断裂工具链）。
-    - cutoff: 待压缩历史的结束位置（也是保留区 messages[cutoff:] 的起始位置）。
-    如果无需压缩或无法裁剪，则返回 None。
+    - start_idx: 待压缩历史的起始位置（第一轮 HumanMessage 的索引）。
+    - cutoff: 待压缩历史的结束位置（也是保留区第 -keep_last_turns 轮起始 HumanMessage 的索引）。
     """
-    # 1. 过滤前置系统消息，提取第一条非系统消息的索引作为初始 start_idx
-    non_system_indices = [i for i, m in enumerate(messages) if getattr(m, "type", None) != "system"]
-    if len(non_system_indices) <= keep_last:  # 非系统消息数量小于等于保留阈值，无需裁剪
+    turns = split_into_turns(messages)
+
+    # 轮次不足保留阈值或无 HumanMessage 锚点，拒绝压缩
+    if len(turns) <= keep_last_turns:
         return None
 
-    # Refuse compaction when no HumanMessage anchor exists (AI-only / tool-only history)
-    if not any(getattr(m, 'type', None) == 'human' for m in messages):
-        return None
+    # 计算压缩切点：压缩除最新 keep_last_turns 轮之外的所有早期轮次
+    start_idx = turns[0][0]  # 第一轮的开始索引
+    cutoff_turn_idx = len(turns) - keep_last_turns
+    cutoff = turns[cutoff_turn_idx][0]  # 最新 N 轮中第一轮的开始索引
 
-    start_idx = non_system_indices[0]
-
-    # --- 左边界 (start_idx) 工具链完整性修复 ---
-    # 如果起始位置落在孤立/残缺的 ToolMessage 上，向右推移以跳过不可用的工具响应
-    while start_idx < len(messages):
-        current_msg = messages[start_idx]
-        msg_type = getattr(current_msg, "type", None)
-
-        if msg_type == "tool":
-            start_idx += 1
-            continue
-        break
-
-    # 目标截断位置（大致保留最近 keep_last 条非系统消息）
-    target_pos = len(non_system_indices) - keep_last
-    cutoff = non_system_indices[target_pos]
-
-    # --- 右边界 (cutoff) 工具链完整性校验 ---
-    while cutoff > 0 and start_idx < cutoff:
-        current_msg = messages[cutoff]
-        msg_type = getattr(current_msg, "type", None)
-        tool_calls = getattr(current_msg, "tool_calls", None)
-
-        # 情况 A：当前节点是发起工具调用的 AIMessage
-        if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
-            expected_count = len(tool_calls)
-            subsequent_msgs = messages[cutoff + 1: cutoff + 1 + expected_count]
-
-            # 校验后续 N 个节点是否全部存在且均为 ToolMessage
-            is_complete_chain = (
-                    len(subsequent_msgs) == expected_count
-                    and all(getattr(m, "type", None) == "tool" for m in subsequent_msgs)
-            )
-
-            if is_complete_chain:
-                # 完整工具链：将 cutoff 推进到该工具链全部节点之后 (+ 1 + expected_count)
-                # 确保切片 messages[start_idx:cutoff] 完整包含 AIMessage 及所有配对 ToolMessage
-                cutoff = cutoff + 1 + expected_count
-                break
-            else:
-                # 不完整工具链：向前回退 1 位寻找安全切点
-                cutoff -= 1
-                continue
-
-        # 情况 B：当前节点是 ToolMessage（处于工具链尾部，向前寻找发起点 AIMessage）
-        if msg_type == "tool":
-            cutoff -= 1
-            continue
-
-        # 情况 C：普通消息（如 HumanMessage 或无 tool_calls 的常规 AIMessage），直接锁定
-        break
-
-    # 边界有效性最终确认
+    # 边界有效性检查
     if start_idx >= cutoff or cutoff >= len(messages):
         return None
 
     return start_idx, cutoff
 
 
+def is_compressible(message) -> bool:
+    """检查消息是否允许被压缩（默认允许）"""
+    # 获取 additional_kwargs 中的 compressible 字段，默认为 True
+    return message.additional_kwargs.get("compressible", True)
+
+
 def render_history(messages):
     """Render messages into plain text for the summarizer LLM."""
     lines = []
-    for m in messages:  # walk every message
-        if isinstance(m, AIMessage):  # model turn
+    for m in messages:
+
+        if not is_compressible(m):
+            continue
+
+        if isinstance(m, AIMessage):
             role = "AI"
-            body = str(m.content) if m.content else "[tool calls] {0}".format(m.tool_calls)
-        elif m.type == "system":  # system turn
+            # body = str(m.content) if m.content else "[tool calls] {0}".format(getattr(m, "tool_calls", []))
+            body = str(m.text)
+        elif isinstance(m, SystemMessage):
             role = "SYSTEM"
-            body = str(m.content)
-        elif isinstance(m, ToolMessage):  # tool result
-            role = "TOOL"
-            body = str(m.content)
-        else:  # human fallback
+            body = str(m.text)
+        # elif isinstance(m, ToolMessage):
+        # role = "TOOL"
+        # body = str(m.content)
+        # body = str("")
+        elif isinstance(m, HumanMessage):
             role = "USER"
-            body = str(m.content)
+            body = str(m.text)
+        else:
+            continue
+
         lines.append("{0}: {1}".format(role, body))
+
     return "\n\n".join(lines)
 
 
-def plan_compaction(messages, keep_last=DEFAULT_KEEP_LAST, threshold_chars=DEFAULT_THRESHOLD_CHARS):
-    """若满足压缩条件，返回 (start_idx, cutoff, history)，否则返回 None。"""
-    if not messages:  # 无消息则跳过
+def plan_compaction(messages, keep_last_turns=DEFAULT_KEEP_LAST_TURNS, threshold_chars=DEFAULT_THRESHOLD_CHARS):
+    """若满足按轮次压缩条件，返回 (start_idx, cutoff, history)，否则返回 None。"""
+    if not messages:
         return None
-    if not should_compress(messages, keep_last, threshold_chars):  # 文本量未达阈值
+    if not should_compress(messages, keep_last_turns, threshold_chars):
         return None
 
-    # 直接获取由 safe_cutoff 规划好的起止绝对索引
-    span = safe_cutoff(messages, keep_last)
+    span = safe_cutoff(messages, keep_last_turns)
     if span is None:
         return None
     start_idx, cutoff = span
 
-    # 提取切片范围内的对话历史（自动过滤掉区间内可能夹杂的系统消息）
-    history = [m for m in messages[start_idx:cutoff]]
+    # 提取待压缩范围内的消息切片
+    history = [m for m in messages[start_idx:cutoff] if getattr(m, "type", None) != "system"]
     if not history:
         return None
 
@@ -139,21 +152,19 @@ def plan_compaction(messages, keep_last=DEFAULT_KEEP_LAST, threshold_chars=DEFAU
 
 
 def summarize_with_model(model, previous_summary, history_messages):
-    """Fold previous summary plus absorbed turns into one new summary string.
-
-    Returns an empty string on any failure so callers can skip compaction safely.
-    """
+    """Fold previous summary plus absorbed turns into one new summary string."""
     from vibe_cli.prompt.sys_summarize_prompt import sys_summarize_prompt
     prompt_text = sys_summarize_prompt(previous_summary, render_history(history_messages))
-    try:  # never let a summarizer failure break the conversation
+    try:
         resp = model.invoke(
-            [SystemMessage(
-                content="You are a meticulous conversation summarizer. Follow the user instruction exactly."),
-             HumanMessage(content=prompt_text)]
+            [
+                SystemMessage(
+                    content="You are a meticulous conversation summarizer. Follow the user instruction exactly."),
+                HumanMessage(content=prompt_text)
+            ]
         )
-    except Exception:  # best-effort compaction
+    except Exception:
         return ""
-    text = resp.content or ""
-    if not isinstance(text, str):  # content blocks list
-        text = " ".join(str(part) for part in text)
+    text = resp.text or ""
+
     return text.strip()

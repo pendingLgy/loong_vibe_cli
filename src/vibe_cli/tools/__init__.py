@@ -8,3 +8,8 @@ ALL_TOOLS = [
     show_diff,
     load_skill_detail,
 ]
+
+
+DANGEROUS_TOOLS = [
+    execute_shell_command,
+]

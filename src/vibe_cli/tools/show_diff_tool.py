@@ -1,5 +1,4 @@
 # show_diff_tool.py - Use IntelliJ IDEA diff command to view file changes.
-import atexit
 import os
 import subprocess
 from pathlib import Path
@@ -32,6 +31,7 @@ def cleanup_temp_files():
             pass
 
     logger.info("临时文件已清理")
+
 
 def __git_head_content(repo_dir: Path, rel_path: str) -> bytes | None:
     """Read original content of file at Git HEAD; return None when unavailable."""
