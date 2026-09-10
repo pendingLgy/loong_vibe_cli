@@ -80,6 +80,36 @@ uv run pytest tests --cov --cov-report=term-missing
 uv run vibe-cli
 ```
 
+## 调试脚本
+
+`scripts\inspect_checkpoint.py` 为独立调试脚本，用于查看 LangGraph Checkpointer 在 PostgreSQL 中的四张表数据。**参数通过函数参数传入**（不使用命令行参数），结果以可序列化 dict 或 JSON 字符串返回（不集成进 Agent 工具链）：
+
+```python
+from scripts.inspect_checkpoint import inspect_table, inspect_table_json
+
+# 方式一：返回可 JSON 序列化的 dict
+result = inspect_table("checkpoints", thread_id="123025", limit=50)
+
+# 方式二：直接返回 JSON 字符串
+print(inspect_table_json("checkpoint_blobs", limit=100, decode_blob=False))
+```
+
+| 参数 | 说明 | 默认值 |
+| ---- | ---- | ---- |
+| table | 表名：checkpoints、checkpoint_blobs、checkpoint_writes、checkpoint_migrations | 必填 |
+| thread_id | 按线程过滤（migrations 表无该列，自动忽略） | None |
+| limit | 返回行数上限 | 50 |
+| decode_blob | 是否将 msgpack blob 反序列化为可读内容 | True |
+| database_url | 可显式传入连接串，缺省读环境变量 | None |
+
+- 默认降序展示最新数据：checkpoints 与 checkpoint_writes 按 checkpoint_id，checkpoint_blobs 按 version
+- 直接运行脚本时，修改文件末尾 TARGET_ 变量即可查看目标数据（uv run python scripts\inspect_checkpoint.py）
+- msgpack blob 自动反序列化为可读文本，LangChain 消息展开为 message_type、id、content、tool_calls
+- decode_blob=False 时退回 UTF-8 优先、hex 兜底的原始输出
+- 解码失败时附 deserialize_error 字段并回退原始内容，保证输出始终为合法 JSON
+- 表名非法或 database_url 缺失时返回带 error 字段的 dict，不抛异常
+- .env 加载顺序与 main.py 一致：当前工作目录优先、其次项目根目录，支持 APP_ENV 指定 .env.{APP_ENV}
+
 ## 常用 uv 命令
 
 | 命令 | 说明 |

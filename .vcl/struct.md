@@ -1,6 +1,6 @@
 # vibe-cli 项目结构
 
-> 文档版本：**v1.1.0** · 每次更新本文件内容时须同步递增版本号：结构性变更或新增章节时次版本加1，局部修改或勘误时修订号加1
+> 文档版本：**v1.5.0** · 每次更新本文件内容时须同步递增版本号：结构性变更或新增章节时次版本加1，局部修改或勘误时修订号加1
 
 基于 LangChain、LangGraph 的 AI 命令行助手，可调用 shell 工具执行命令，并通过安全审查机制拦截高风险操作。
 
@@ -19,6 +19,7 @@ vibe-cli\
 ├─ .env                        # 环境变量(model_provider、database_url、work_dir、IDEA_HOME 等)
 ├─ vibe_agent_workflow.png     # start() 启动时自动生成的工作流拓扑图
 ├─ tests\                      # pytest 测试(消息压缩: 48 单元 + 16 集成, 共 64 例)
+├─ scripts\                    # 本地调试脚本(inspect_checkpoint.py 经函数参数查 PostgreSQL checkpoint 四表, 按 checkpoint_id 与 version 降序, msgpack 自动解码, 不集成进 Agent 工具链)
 ├─ src\
    ├─ vibe_cli\                # 主包
       ├─ main.py               # 程序入口: get_base_dir(兼容源码与 PyInstaller exe)、_resolve_env_file 按序加载 .env(支持 APP_ENV)、run() 启动 workflow(REPL)

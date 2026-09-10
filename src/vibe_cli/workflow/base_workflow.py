@@ -139,7 +139,9 @@ def compact_msg_node(state):
     messages = state.get("messages", [])
     if not messages:  # 冷启动无消息
         return {}
-    threshold = int(os.getenv("compress_threshold_chars", "12000"))
+
+    # 适配 1M Context Window 的默认阈值（120万字符）
+    threshold = int(os.getenv("compress_threshold_chars", "1200000"))
     keep_last_turns = int(os.getenv("compress_keep_last_turns", "3"))
 
     # 获取由 plan_compaction 返回的起止绝对索引及历史消息

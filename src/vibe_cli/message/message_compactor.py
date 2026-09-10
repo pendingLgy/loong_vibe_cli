@@ -23,7 +23,7 @@ def is_summary_message(msg) -> bool:
 
 def total_size(messages):
     """Rough char-based size of the non-system conversation."""
-    return sum(len(str(m.content)) for m in messages if m.type != "system")
+    return sum(len(str(m.content)) for m in messages)
 
 
 def split_into_turns(messages):
