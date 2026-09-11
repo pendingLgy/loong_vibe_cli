@@ -14,6 +14,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Confirm
 
+from vibe_cli.core.task_resume import task_resume
 from vibe_cli.env.check_point_memory import postgres_memory
 from vibe_cli.env.logger_config import logger
 from vibe_cli.message.message_compactor import plan_compaction, summarize_with_model
@@ -22,8 +23,8 @@ from vibe_cli.prompt.sys_diff_prompt import diff_prompt
 from vibe_cli.prompt.sys_safe_check_prompt import sys_safe_check_prompt
 from vibe_cli.skill.loading_skill import SkillRegistry
 from vibe_cli.tools import ALL_TOOLS, DANGEROUS_TOOLS
-from vibe_cli.workflow.load_sys_prompt import sync_system_prompts
-from vibe_cli.workflow.node_state import AgentState
+from vibe_cli.core.load_sys_prompt import sync_system_prompts
+from vibe_cli.core.node_state import AgentState
 from vibe_cli.wraps.monitor import monitor_node
 
 SUMMARY_BOOKMARK_PREFIX = "【历史摘要】以下是早期对话的摘要（已压缩省略）：\\n"
@@ -129,7 +130,7 @@ def call_model(state: AgentState):
 
 
 @monitor_node("compact_msg_node")
-def compact_msg_node(state):
+def compact_msg_node(state, config):
     """消息历史压缩节点（图入口）。
 
     在每轮对话开始前运行。当累积的对话超出配置的阈值时，
@@ -154,9 +155,9 @@ def compact_msg_node(state):
     # 2. 遍历每一行/每一条旧摘要，在末尾拼接逗号 ","
     # 3. 用换行符连接成一个多行汇总字符串
     old_summary = "\n".join(
-        f"对话{index},内容：\n{str(m.content)} \n"
+        f"对话{index},内容：\n{str(m.text)} \n"
         for index, m in enumerate(messages[start_idx:cutoff], start=start_idx)
-        if m.content
+        if m.text
     )
 
     model = get_model(provider=state.get("model_provider"))
@@ -178,7 +179,7 @@ def compact_msg_node(state):
 
     # 3. 构造历史摘要消息
     summary_msg = HumanMessage(
-        id="summary-" + uuid.uuid4().hex[:8],
+        id="summary-" + uuid.uuid4().hex[:16],
         content=SUMMARY_BOOKMARK_PREFIX + new_summary,
         additional_kwargs={"is_summary": True}
     )
@@ -187,7 +188,7 @@ def compact_msg_node(state):
     rebuilt_tail = []
     for m in kept_messages:
         clone = m.model_copy(deep=True)
-        clone.id = "keep-" + uuid.uuid4().hex[:8]
+        clone.id = "keep-" + uuid.uuid4().hex[:16]
         rebuilt_tail.append(clone)
 
     logger.info(
@@ -478,17 +479,19 @@ def start():
     config = {
         "configurable": {
             # "thread_id": str(uuid.uuid4()),
-            "thread_id": "123025",
+            "thread_id": "123028",
             "skill_registry": skill_registry
         }
     }
 
+    console = Console()
+
     app = build_vibe_app()
 
-    create_workflow_img(app)
+    task_resume(app, config, console)
+    # create_workflow_img(app)
     sync_system_prompts(app, config, skill_registry, work_dir)
 
-    console = Console()
     console.print(Panel.fit(
         "🚀 [bold cyan]Local Vibe Coding Assistant (Official Interrupt)[/bold cyan]\n输入你的需求，输入 exit 退出。",
         border_style="cyan"))
@@ -516,7 +519,8 @@ def start():
                 continue  # 拦截成功后直接进入下一轮循环，不走后续的大模型 Agent 流程
 
             # 初始输入流或恢复流
-            stream_input = {"model_provider": model_provider, "work_dir": work_dir, "messages": [HumanMessage(content=user_input)]}
+            stream_input = {"model_provider": model_provider, "work_dir": work_dir,
+                            "messages": [HumanMessage(content=user_input)]}
 
             while True:
 

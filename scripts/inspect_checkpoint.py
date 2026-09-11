@@ -28,29 +28,90 @@ from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from psycopg.rows import dict_row
 
-TABLES = [
-    "checkpoints",
-    "checkpoint_blobs",
-    "checkpoint_writes",
-    "checkpoint_migrations",
-]
+# ============================================================================
+# [!] 常量补全（历史遗留问题）：以下常量在原文件中被引用却从未定义，
+#     直接调用 inspect_table、inspect_checkpoint_detail 会抛 NameError。
+# ============================================================================
 
-# 支持按 thread_id 过滤的表（checkpoint_migrations 无 thread_id 列）
-THREAD_FILTERED_TABLES = {
-    "checkpoints",
-    "checkpoint_blobs",
-    "checkpoint_writes",
-}
+# 可查询的四张 checkpoint 表
+TABLES = ('checkpoints', 'checkpoint_blobs', 'checkpoint_writes', 'checkpoint_migrations')
 
-# 存放序列化二进制内容的列名
-BLOB_VALUE_COLUMN = "blob"
+# 含 thread_id 列、可按线程过滤的表（checkpoint_migrations 无该列）
+THREAD_FILTERED_TABLES = {'checkpoints', 'checkpoint_blobs', 'checkpoint_writes'}
 
-# 各表默认排序（降序展示最新数据）：checkpoints 与 checkpoint_writes 按 checkpoint_id，checkpoint_blobs 按 version
-ORDER_BY_COLUMNS = {
-    "checkpoints": "checkpoint_id",
-    "checkpoint_writes": "checkpoint_id",
-    "checkpoint_blobs": "version",
-}
+# 各表默认排序列（按最新数据降序展示）
+ORDER_BY_COLUMNS = {'checkpoints': 'checkpoint_id', 'checkpoint_blobs': 'version', 'checkpoint_writes': 'checkpoint_id', 'checkpoint_migrations': 'v'}
+
+# msgpack blob 列名（需按 type 反序列化）
+BLOB_VALUE_COLUMN = 'blob'
+
+# bytea[] 数组列（元素形如 [channel, type, blob]，需逐元素反序列化）
+DETAIL_BLOB_ARRAY_COLUMNS = {'channel_values', 'pending_writes', 'sends'}
+
+
+SELECT_CHECKPOINT_WITH_BLOBS = """
+select
+    thread_id,
+    checkpoint,
+    checkpoint_ns,
+    checkpoint_id,
+    parent_checkpoint_id,
+    metadata,
+    (
+        select array_agg(array[bl.channel::bytea, bl.type::bytea, bl.blob])
+        from jsonb_each_text(checkpoint -> 'channel_versions')
+        inner join checkpoint_blobs bl
+            on bl.thread_id = checkpoints.thread_id
+            and bl.checkpoint_ns = checkpoints.checkpoint_ns
+            and bl.channel = jsonb_each_text.key
+            and bl.version = jsonb_each_text.value
+    ) as channel_values,
+    (
+        select
+        array_agg(array[cw.task_id::text::bytea, cw.channel::bytea, cw.type::bytea, cw.blob] order by cw.task_id, cw.idx)
+        from checkpoint_writes cw
+        where cw.thread_id = checkpoints.thread_id
+            and cw.checkpoint_ns = checkpoints.checkpoint_ns
+            and cw.checkpoint_id = checkpoints.checkpoint_id
+    ) as pending_writes
+from checkpoints
+where thread_id = %s and checkpoint_ns = %s
+order by checkpoint_id desc
+limit 1
+"""
+
+# [!] 已移除历史查询语句 SELECT_PENDING_SENDS_SQL：其引用未定义的 TASKS 常量，且全项目无调用点。
+
+# [!] 以下为从 LangGraph 源码拷贝的历史遗留写库语句（UPSERT、INSERT），本只读调试脚本无调用点，可酌情删除。
+UPSERT_CHECKPOINT_BLOBS_SQL = """
+    INSERT INTO checkpoint_blobs (thread_id, checkpoint_ns, channel, version, type, blob)
+    VALUES (%s, %s, %s, %s, %s, %s)
+    ON CONFLICT (thread_id, checkpoint_ns, channel, version) DO NOTHING
+"""
+
+UPSERT_CHECKPOINTS_SQL = """
+    INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, checkpoint, metadata)
+    VALUES (%s, %s, %s, %s, %s, %s)
+    ON CONFLICT (thread_id, checkpoint_ns, checkpoint_id)
+    DO UPDATE SET
+        checkpoint = EXCLUDED.checkpoint,
+        metadata = EXCLUDED.metadata;
+"""
+
+UPSERT_CHECKPOINT_WRITES_SQL = """
+    INSERT INTO checkpoint_writes (thread_id, checkpoint_ns, checkpoint_id, task_id, task_path, idx, channel, type, blob)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (thread_id, checkpoint_ns, checkpoint_id, task_id, idx) DO UPDATE SET
+        channel = EXCLUDED.channel,
+        type = EXCLUDED.type,
+        blob = EXCLUDED.blob;
+"""
+
+INSERT_CHECKPOINT_WRITES_SQL = """
+    INSERT INTO checkpoint_writes (thread_id, checkpoint_ns, checkpoint_id, task_id, task_path, idx, channel, type, blob)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (thread_id, checkpoint_ns, checkpoint_id, task_id, idx) DO NOTHING
+"""
 
 
 def _get_base_dir() -> Path:
@@ -156,6 +217,8 @@ def _decode_blob(blob_type, blob_bytes, serde):
 
 def _row_to_dict(row, serde=None, decode_blob=True):
     """逐字段解码；blob 列在开启解码时尝试反序列化。"""
+    # [!] 潜在脆弱点：blob_type 依赖行内的 type 列；checkpoint_blobs 与 checkpoint_writes
+    #     的 SELECT * 恰好含该列，但若查询改为仅取 blob 列，将拿不到 type 导致解码失败。
     blob_type = row.get("type")
     result = {}
     for key, value in row.items():
@@ -175,6 +238,8 @@ def query_table(conn, table, thread_id=None, limit=50, serde=None, decode_blob=T
         params.append(thread_id)
     order_col = ORDER_BY_COLUMNS.get(table)
     order = " ORDER BY {0} DESC".format(order_col) if order_col else ""
+    # [!] table 与 order_col 直接拼接进 SQL：当前表名经 TABLES 白名单校验（见 inspect_table），
+    #     若调用方绕过校验直接调用本函数，存在 SQL 注入风险。
     sql = "SELECT * FROM {0}{1}{2} LIMIT %s".format(table, where, order)
     params.append(limit)
     with conn.cursor(row_factory=dict_row) as cur:
@@ -249,16 +314,93 @@ def inspect_table_json(
     return json.dumps(payload, ensure_ascii=False, indent=indent)
 
 
+
+
+def _decode_blob_array(items, serde):
+    """将 [..., type, blob] 形式的 bytea 数组按 type 反序列化末位 blob。"""
+    decoded = [_to_readable(item) for item in items]
+    if len(items) >= 2 and isinstance(items[-2], (bytes, bytearray, memoryview)) and isinstance(items[-1], (bytes, bytearray, memoryview)):
+        blob_type = bytes(items[-2]).decode("utf-8", "replace")
+        decoded[-1] = _decode_blob(blob_type, items[-1], serde)
+    return decoded
+
+
+def _row_to_detail(row, serde):
+    """专用行解码：blob 数组列按 type 反序列化，其余字段走可读化转换。"""
+    result = {}
+    for key, value in row.items():
+        if key in DETAIL_BLOB_ARRAY_COLUMNS and isinstance(value, (list, tuple)):
+            result[key] = [_decode_blob_array(item, serde) for item in value]
+        else:
+            result[key] = _to_readable(value)
+    return result
+
+
+def inspect_checkpoint_detail(
+    thread_id: str,
+    checkpoint_id: str,
+    checkpoint_ns: str = "",
+    database_url: str | None = None,
+) -> dict:
+    """执行 LangGraph 官方 get_tuple 查询：取回指定 checkpoint 及其 channel_values 与 pending_writes。
+
+    Args:
+        thread_id: 目标线程 ID。
+        checkpoint_id: 目标检查点 ID。
+        checkpoint_ns: 检查点命名空间，默认空字符串。
+        database_url: 可显式传入连接串，缺省时读取环境变量 database_url。
+
+    Returns:
+        dict: 含 table、thread_id、checkpoint_id、row_count、rows 字段；失败时含 error 字段。
+    """
+    result = {
+        "table": "checkpoints + channel_values + pending_writes",
+        "thread_id": thread_id,
+        "checkpoint_id": checkpoint_id,
+        "row_count": 0,
+        "rows": [],
+    }
+
+    env_file = _load_env()
+    if env_file is not None:
+        print("[Config] loaded env file: " + str(env_file), file=sys.stderr)
+
+    url = database_url or os.getenv("database_url")
+    if not url:
+        result["error"] = "环境变量 database_url 未设置"
+        return result
+
+    serde = JsonPlusSerializer()
+    try:
+        with psycopg.connect(url, row_factory=dict_row) as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                # [!] 功能缺陷：入参 checkpoint_id 未参与 SQL 过滤，SELECT_CHECKPOINT_WITH_BLOBS
+                #     仅按 thread_id 与 checkpoint_ns 查询并返回该线程全部 checkpoint（降序），
+                #     checkpoint_id 形同虚设；如需精确定位，应在 SQL 追加 and checkpoint_id = %s。
+                cur.execute(SELECT_CHECKPOINT_WITH_BLOBS, (thread_id, checkpoint_ns))
+                rows = [_row_to_detail(r, serde) for r in cur.fetchall()]
+        result["rows"] = rows
+        result["row_count"] = len(rows)
+    except Exception as exc:
+        result["error"] = "{0}: {1}".format(type(exc).__name__, exc)
+    return result
+
+
 if __name__ == "__main__":
     # 直接运行本脚本时，按需修改以下参数即可查看目标数据
-    TARGET_TABLE = "checkpoint_blobs"
-    TARGET_THREAD_ID = "123025"
+    TARGET_TABLE = "checkpoint_writes"
+    TARGET_THREAD_ID = "123027"
     TARGET_LIMIT = 10
     DECODE_BLOB = True
 
-    print(inspect_table_json(
-        TARGET_TABLE,
+    # print(inspect_table_json(
+    #     TARGET_TABLE,
+    #     thread_id=TARGET_THREAD_ID,
+    #     limit=TARGET_LIMIT,
+    #     decode_blob=DECODE_BLOB,
+    # ))
+
+    print(inspect_checkpoint_detail(
         thread_id=TARGET_THREAD_ID,
-        limit=TARGET_LIMIT,
-        decode_blob=DECODE_BLOB,
+        checkpoint_id="",
     ))

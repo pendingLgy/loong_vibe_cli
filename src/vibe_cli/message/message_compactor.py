@@ -41,7 +41,7 @@ def split_into_turns(messages):
     for idx, m in enumerate(messages):
 
         # 遇真正的 HumanMessage（且非历史摘要消息），开启/切分轮次
-        if isinstance(m, HumanMessage) and not is_summary_message(m):
+        if isinstance(m, HumanMessage):
             if current_turn_start is not None:
                 turns.append((current_turn_start, idx))
             current_turn_start = idx
