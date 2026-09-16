@@ -17,6 +17,7 @@ from rich.prompt import Confirm
 from vibe_cli.core.task_resume import task_resume
 from vibe_cli.env.check_point_memory import postgres_memory
 from vibe_cli.env.logger_config import logger
+from vibe_cli.message.message_check import check_message_completed
 from vibe_cli.message.message_compactor import plan_compaction, summarize_with_model
 from vibe_cli.model.model_factory import get_model
 from vibe_cli.prompt.sys_diff_prompt import diff_prompt
@@ -479,7 +480,7 @@ def start():
     config = {
         "configurable": {
             # "thread_id": str(uuid.uuid4()),
-            "thread_id": "123028",
+            "thread_id": "123029",
             "skill_registry": skill_registry
         }
     }
@@ -491,6 +492,7 @@ def start():
     task_resume(app, config, console)
     # create_workflow_img(app)
     sync_system_prompts(app, config, skill_registry, work_dir)
+    check_message_completed(app, config)
 
     console.print(Panel.fit(
         "🚀 [bold cyan]Local Vibe Coding Assistant (Official Interrupt)[/bold cyan]\n输入你的需求，输入 exit 退出。",
