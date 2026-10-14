@@ -40,6 +40,10 @@ def create_workflow_img(app: CompiledStateGraph[Any, Any, Any, Any], work_dir: s
 def start():
     work_dir = os.getenv("work_dir")
     model_provider = os.getenv("model_provider")
+    security_opt_skip = bool(os.getenv("security_opt_skip",False))
+    compress_threshold_chars = int(os.getenv("compress_threshold_chars", "1200000"))
+    compress_keep_last_turns = int(os.getenv("compress_keep_last_turns", "3"))
+    max_compressive_messages = int(os.getenv("max_compressive_messages", "10"))
 
     required_fields = {
         "work_dir": work_dir,
@@ -63,8 +67,12 @@ def start():
     config = {
         "configurable": {
             # "thread_id": str(uuid.uuid4()),
-            "thread_id": "123060",
-            "skill_registry": skill_registry
+            "thread_id": "123061",
+            "skill_registry": skill_registry,
+            "security_opt_skip": security_opt_skip, # 跳过安全限制
+            "compress_threshold_chars": compress_threshold_chars, # 消息压缩触发阈值
+            "compress_keep_last_turns": compress_keep_last_turns, # 消息压缩保留轮次
+            "max_compressive_messages": max_compressive_messages,
         }
     }
 
@@ -73,7 +81,7 @@ def start():
     app = build_vibe_app()
 
     task_resume(app, config, console)
-    create_workflow_img(app, work_dir)
+    # create_workflow_img(app, work_dir)
     sync_system_prompts(app, config, skill_registry, [str(p) for p in get_work_dirs(work_dir)])
     check_message_completed(app, config)
 
@@ -104,8 +112,11 @@ def start():
                 continue  # 拦截成功后直接进入下一轮循环，不走后续的大模型 Agent 流程
 
             # 初始输入流或恢复流
-            stream_input = {"model_provider": model_provider, "work_dir": work_dir, "security_opt_skip":True,
-                            "messages": [HumanMessage(content=user_input)]}
+            stream_input = {
+                "model_provider": model_provider,
+                "work_dir": work_dir,
+                "messages": [HumanMessage(content=user_input)]
+            }
 
             while True:
 

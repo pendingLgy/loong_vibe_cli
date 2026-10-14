@@ -1,6 +1,6 @@
 # vibe-cli 项目结构
 
-> 文档版本: **v1.7.0** · 每次更新本文件内容时须同步递增版本号: 结构性变更或新增章节时次版本加1, 局部修改或勘误时修订号加1
+> 文档版本: **v1.8.0** · 每次更新本文件内容时须同步递增版本号: 结构性变更或新增章节时次版本加1, 局部修改或勘误时修订号加1
 
 基于 LangChain、LangGraph 的 AI 命令行助手，可调用 shell 工具执行命令，并通过安全审查机制拦截高风险操作。
 
@@ -18,7 +18,7 @@ vibe-cli\
 ├─ uv.lock                     # uv 依赖锁文件
 ├─ .env                        # 环境变量(model_provider、database_url、work_dir、IDEA_HOME 等)
 ├─ vibe_agent_workflow.png     # start() 启动时自动生成的工作流拓扑图
-├─ tests\                      # pytest 测试(消息压缩: 48 单元 + 16 集成, 共 64 例)
+├─ tests\                      # pytest 测试(消息压缩单元 test_message_compactor.py, 9 例, 自包含无 conftest)
 ├─ scripts\                    # 本地调试脚本(inspect_checkpoint.py 经函数参数查 PostgreSQL checkpoint 四表, 按 checkpoint_id 与 version 降序, msgpack 自动解码, 不集成进 Agent 工具链)
 ├─ src\
    ├─ vibe_cli\                # 主包
@@ -33,13 +33,13 @@ vibe-cli\
       |   ├─ __init__.py
       |
       ├─ core\                 # 核心状态与编排
-      |   ├─ node_state.py          # 状态定义: AgentState(TypedDict) + NodeStatus(NORMAL、PEND_APPROVAL、FINISHED)
-      |   ├─ load_sys_prompt.py     # 系统提示注入: SYS_ID_* 固定 ID、_load_system_struct_prompt(primary_dir) 读取主工作区 .vcl\struct.md、_init_sys_prompt、sync_system_prompts(update_state 幂等覆盖)
+      |   ├─ node_state.py          # 状态定义: AgentState(TypedDict: messages、requires_approval、node_status、model_provider、work_dir) + NodeStatus(NORMAL、PEND_APPROVAL、FINISHED); security_opt_skip 已迁出 state(改由 config 传入)
+      |   ├─ load_sys_prompt.py     # 系统提示注入: SYS_ID_* 固定 ID(vibe-coding、struct、code-analysis、code-generate、skill-index)、_load_system_struct_prompt(primary_dir) 读取主工作区 .vcl\struct.md、_init_sys_prompt、sync_system_prompts(update_state 幂等覆盖)
       |   ├─ task_resume.py         # 断点续跑: task_resume(app, config, console) 检测未完成任务并以 stream_events 恢复
       |   ├─ __init__.py
       |
       ├─ message\              # 消息压缩与清理模块
-      |   ├─ message_compactor.py   # 按轮次(Turn)压缩核心: is_summary_message、total_size、split_into_turns、should_compress、safe_cutoff、is_compressible、render_history、plan_compaction、summarize_with_model(模块默认阈值 12000 字符, 保留最近 3 轮)
+      |   ├─ message_compactor.py   # 滚动压缩核心(闭区间轮次): is_summary_message、total_size(跳过系统提示)、split_into_turns(闭区间 [start,end], 排除摘要)、should_compress(轮数+字符双门控)、safe_cutoff(增量、全量、摘要超标联动, 闭区间)、render_history、plan_compaction、summarize_with_model(DEFAULT_THRESHOLD_CHARS=1200000、DEFAULT_KEEP_LAST_TURNS=12、DEFAULT_MAX_COMPRESSIVE_MESSAGES=50, 摘要失败安全跳过)
       |   ├─ message_check.py       # 消息完整性清理: check_message_completed 删除 tool_calls 未全部完成的 AIMessage 及其孤立 ToolMessage
       |   ├─ __init__.py
       |
@@ -50,7 +50,9 @@ vibe-cli\
       ├─ prompt\               # 提示词模板
       |   ├─ sys_env_prompt.py          # Vibe Coding 系统提示词(sys_vibe_coding_agent(work_dirs), 含跨平台 Shell 与多工作区边界约束)
       |   ├─ sys_safe_check_prompt.py   # 工具调用安全审查提示词(高风险、耗时操作判定, 要求 JSON 输出)
-      |   ├─ sys_summarize_prompt.py    # 消息压缩摘要提示词(折叠旧摘要与历史, 输出中文摘要 500 字以内)
+      |   ├─ sys_summarize_prompt.py    # 滚动摘要提示词(融合既有摘要与新历史, 保留技术栈、架构决策、未竟事项, 输出结构化中文摘要)
+      |   ├─ sys_code_analysis_prompt.py # 代码静态分析提示词(code_analysis_prompt, 6 维度结构化输出 + Few-Shot)
+      |   ├─ sys_code_generate_prompt.py # 代码生成提示词(code_generate_prompt, 滚动压缩模块跨语言架构规范与调用树契约)
       |   ├─ sys_diff_prompt.py         # 动态 Diff 变更汇总报告提示词(diff_prompt)
       |   ├─ __init__.py
       |
@@ -70,8 +72,8 @@ vibe-cli\
       |   ├─ __init__.py
       |
       ├─ workflow\             # LangGraph 工作流
-      |   ├─ node_graph.py        # 同步核心图: build_vibe_app() 组装 6 节点(compact_msg、agent、safety_check、pend_approval、tools、dynamic_diff_node) + 条件路由 + interrupt 人工审批(HITL)
-      |   ├─ base_workflow.py     # 启动与交互: start() 构建图、注入系统提示、恢复任务、REPL 主循环(stream_events v3 打字机 + 技能快捷指令)
+      |   ├─ node_graph.py        # 同步核心图: build_vibe_app() 组装 6 节点(compact_msg、agent、safety_check、pend_approval、tools、dynamic_diff_node) + 条件路由 + interrupt 人工审批(HITL); 内含 compact_msg_node(图入口压缩节点, 从 config 读取 threshold_chars、keep_last_turns、max_compressive_messages)与 SUMMARY_BOOKMARK_PREFIX 书签(<!-- [ROLLING_SUMMARY] -->)
+      |   ├─ base_workflow.py     # 启动与交互: start() 构建图、config 注入压缩参数与 security_opt_skip、注入系统提示、恢复任务、REPL 主循环(stream_events v3 打字机 + 技能快捷指令)
       |   ├─ __init__.py
 ```
 
@@ -80,24 +82,25 @@ vibe-cli\
 1. main.run() 加载 .env 环境变量后同步调用 workflow.base_workflow.start()
 2. base_workflow.start() 构建 REPL: 创建 app = node_graph.build_vibe_app()、初始化 SkillRegistry、sync_system_prompts 注入系统提示、task_resume 恢复任务、check_message_completed 清理未完成消息
 3. node_graph.build_vibe_app() 构建 StateGraph(6 个显式节点, 入口 compact_msg, ToolNode 包装 ALL_TOOLS):
-   - compact_msg: 入口节点, 按轮次执行消息压缩(plan_compaction + summarize_with_model)
+   - compact_msg: 入口节点(定义于 node_graph), 执行滚动压缩(plan_compaction + summarize_with_model, 参数取自 config)
    - agent: call_model 节点, 模型生成回复、决定是否调用工具(route_agent: 无工具调用时直接结束)
    - safety_check: 对工具调用进行 LLM 安全审查(解析 JSON: is_dangerous、reason、file)
    - pend_approval: 高危操作通过 interrupt() 挂起, 等待人工审批; 用户拒绝时注入 ToolMessage 通知模型取消
    - tools: ToolNode 执行工具(ALL_TOOLS 注册表)
    - dynamic_diff_node: 定义保留但未接入(对应 tools 条件连边处于注释状态)
-4. 消息压缩流程(按轮次): split_into_turns 切分轮次 -> should_compress 与 safe_cutoff 判定 -> plan_compaction 返回 (start_idx、cutoff、history) -> summarize_with_model 折叠旧摘要与历史 -> compact_msg 节点以 RemoveMessage 删除从 start_idx 起的全部旧消息, 再追加 HumanMessage(summary 前缀书签) + keep 前缀克隆重建保留尾部; 摘要生成失败时安全跳过
+4. 消息压缩流程(闭区间轮次 + 双门控 + 批次上限): split_into_turns 切出闭区间轮次 [start,end] -> should_compress(轮数+字符)与 safe_cutoff(增量优先, 超 max_compressive_messages 或摘要条数超标则全量或联动, 起点可前移至旧摘要) -> plan_compaction 返回 (start_idx、end_idx、history) -> compact_msg 抽取既有摘要(剥离书签)作 previous_summary, 调 summarize_with_model 生成新滚动摘要 -> 以 RemoveMessage 删除 start_idx 起全部旧消息, 再追加 HumanMessage(SUMMARY_BOOKMARK_PREFIX + 摘要, compressible=False) + keep- 前缀克隆重建保留尾部; 摘要失败时安全跳过
 5. 工具执行完成后回到 agent 循环(workflow.add_edge(tools, agent)); route_check_mutation 与 dynamic Diff 目前未启用
 6. 高危操作通过 interrupt() 挂起; REPL 由 stream_events(v3) 驱动打字机流, 检测到 stream.interrupted 时读取 stream.interrupts 展示审批信息, 用户经 Confirm 确认后以 Command(resume=approved、rejected) 恢复
 7. 模型由 model_factory.get_model(provider=state.model_provider) 创建; 模型厂商由环境变量 model_provider 指定(openai 或 deepseek)
 8. 对话消息通过同步 PostgreSQL Checkpointer(单例 ConnectionPool)持久化, 支持断点续跑(thread_id 恢复上下文)
-9. 系统提示注入: start() 每次启动都会调用 core.load_sys_prompt.sync_system_prompts(), 将 3 条固定 ID 的 SystemMessage(sys-vibe-coding、sys-struct、sys-skill-index, 均标记 compressible=False) 经 app.update_state 幂等覆盖或追加到状态, 内容来自 sys_env_prompt、主工作区 .vcl\struct.md、.vcl\skills\skill_index.md
+9. 系统提示注入: start() 每次启动都会调用 core.load_sys_prompt.sync_system_prompts(), 将 5 条固定 ID 的 SystemMessage(sys-vibe-coding、sys-struct、sys-code-analysis、sys-code-generate、sys-skill-index, 均标记 compressible=False) 经 app.update_state 幂等覆盖或追加到状态, 内容来自 sys_env_prompt、主工作区 .vcl\struct.md、sys_code_analysis_prompt、sys_code_generate_prompt、.vcl\skills\skill_index.md
 10. 本文件 .vcl\struct.md 会被 core.load_sys_prompt 模块的 _load_system_struct_prompt(primary_dir) 读取作为系统提示词, 帮助 AI 理解项目结构; start() 启动时还会生成 vibe_agent_workflow.png 流程图
 11. REPL 内置技能清单快捷指令, 可跳过 Agent 直接展示 .vcl\skills\skill_index.md 中的已注册技能内容
 
 ## 安全机制
 
 - 工具调用前由 safety_check 节点审查, 高风险、耗时操作进入人工审批(pend_approval 节点 interrupt 挂起)
+- security_opt_skip 改由 config.configurable 注入(base_workflow.start 默认 True), safety_check_node 读取 config 决定是否跳过 LLM 安全审查(原 AgentState 字段已移除)
 - wraps.workspace_security 的 enforce_workspace_security 装饰器包装 shell 工具, 支持多工作区: cwd 与 command 中的绝对路径须落在任一合法工作区内, 否则拦截并提示全部合法工作区
 - 该装饰器在 Windows 下放行行内命令开关(如 dir 的 b、findstr 的 S 等斜杠参数), 避免将开关误判为越权绝对路径, 同时仍校验真正的盘符路径与多段 Unix 绝对路径
 - 所有节点由 wraps.monitor 的 monitor_node 装饰器监控, 记录节点耗时与成败日志

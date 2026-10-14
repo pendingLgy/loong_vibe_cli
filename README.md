@@ -18,7 +18,7 @@ vibe-cli\
 ├─ uv.lock                     # uv 依赖锁文件
 ├─ .env                        # 环境变量(model_provider、database_url、work_dir、IDEA_HOME 等)
 ├─ vibe_agent_workflow.png     # start() 启动时自动生成的工作流拓扑图
-├─ tests\                      # pytest 测试(消息压缩: 48 单元 + 16 集成, 共 64 例)
+├─ tests\                      # pytest 测试(消息压缩单元测试 test_message_compactor.py, 9 例, 自包含无 conftest)
 ├─ scripts\                    # 本地调试脚本(inspect_checkpoint.py 经函数参数查 PostgreSQL checkpoint 四表, 不集成进 Agent 工具链)
 ├─ src\
    ├─ vibe_cli\                # 主包
@@ -34,12 +34,12 @@ vibe-cli\
       |
       ├─ core\                 # 核心状态与编排
       |   ├─ node_state.py          # 状态定义: AgentState(TypedDict) + NodeStatus(NORMAL、PEND_APPROVAL、FINISHED)
-      |   ├─ load_sys_prompt.py     # 系统提示注入: SYS_ID_* 固定 ID、_load_system_struct_prompt(primary_dir) 读取 .vcl\struct.md、_init_sys_prompt、sync_system_prompts(update_state 幂等覆盖)
+      |   ├─ load_sys_prompt.py     # 系统提示注入: SYS_ID_* 固定 ID(vibe-coding、struct、code-analysis、code-generate、skill-index)、_load_system_struct_prompt(primary_dir) 读取 .vcl\struct.md、_init_sys_prompt、sync_system_prompts(update_state 幂等覆盖)
       |   ├─ task_resume.py         # 断点续跑: task_resume(app, config, console) 检测未完成任务并以 stream_events 恢复
       |   ├─ __init__.py
       |
       ├─ message\              # 消息压缩与清理模块
-      |   ├─ message_compactor.py   # 按轮次(Turn)压缩核心: is_summary_message、total_size、split_into_turns、should_compress、safe_cutoff、is_compressible、render_history、plan_compaction、summarize_with_model(模块默认阈值 12000 字符, 保留最近 3 轮)
+      |   ├─ message_compactor.py   # 滚动压缩核心(闭区间轮次): is_summary_message、total_size、split_into_turns(闭区间 [start,end])、should_compress(轮数+字符双门控)、safe_cutoff(增量、全量、摘要超标联动, 返回闭区间)、render_history、plan_compaction、summarize_with_model(常量 DEFAULT_THRESHOLD_CHARS=1200000、DEFAULT_KEEP_LAST_TURNS=12、DEFAULT_MAX_COMPRESSIVE_MESSAGES=50, 摘要失败安全跳过)
       |   ├─ message_check.py       # 消息完整性清理: check_message_completed 删除 tool_calls 未全部完成的 AIMessage 及其孤立 ToolMessage
       |   ├─ __init__.py
       |
@@ -50,7 +50,9 @@ vibe-cli\
       ├─ prompt\               # 提示词模板
       |   ├─ sys_env_prompt.py          # Vibe Coding 系统提示词(sys_vibe_coding_agent(work_dirs), 含跨平台 Shell 与多工作区边界约束)
       |   ├─ sys_safe_check_prompt.py   # 工具调用安全审查提示词(高风险、耗时操作判定, 要求 JSON 输出)
-      |   ├─ sys_summarize_prompt.py    # 消息压缩摘要提示词(折叠旧摘要与历史, 输出中文摘要 500 字以内)
+      |   ├─ sys_summarize_prompt.py    # 滚动摘要提示词(融合既有摘要与新历史, 保留技术栈、架构决策、未竟事项, 输出结构化中文摘要)
+      |   ├─ sys_code_analysis_prompt.py # 代码静态分析提示词(code_analysis_prompt, 6 维度结构化输出 + Few-Shot)
+      |   ├─ sys_code_generate_prompt.py # 代码生成提示词(code_generate_prompt, 滚动压缩模块跨语言架构规范与调用树契约)
       |   ├─ sys_diff_prompt.py         # 动态 Diff 变更汇总报告提示词(diff_prompt)
       |   ├─ __init__.py
       |
@@ -70,8 +72,8 @@ vibe-cli\
       |   ├─ __init__.py
       |
       ├─ workflow\             # LangGraph 工作流
-      |   ├─ node_graph.py        # 同步核心图: build_vibe_app() 组装 6 节点(compact_msg、agent、safety_check、pend_approval、tools、dynamic_diff_node) + 条件路由 + interrupt 人工审批(HITL)
-      |   ├─ base_workflow.py     # 启动与交互: start() 构建图、注入系统提示、恢复任务、REPL 主循环(stream_events v3 打字机 + 技能快捷指令)
+      |   ├─ node_graph.py        # 同步核心图: build_vibe_app() 组装 6 节点(compact_msg、agent、safety_check、pend_approval、tools、dynamic_diff_node) + 条件路由 + interrupt 人工审批(HITL); 含 compact_msg_node(从 config 读取压缩参数)与 SUMMARY_BOOKMARK_PREFIX 书签
+      |   ├─ base_workflow.py     # 启动与交互: start() 构建图、config 注入压缩参数与 security_opt_skip、注入系统提示、恢复任务、REPL 主循环(stream_events v3 打字机 + 技能快捷指令)
       |   ├─ __init__.py
 ```
 
@@ -85,9 +87,9 @@ Agent 由 LangGraph 同步 StateGraph 驱动, 图定义在 workflow\node_graph.p
   - 无工具调用: 直接结束本轮, 输出回复。
   - 有工具调用: 进入 safety_check 做 LLM 安全审查; 高危操作转入 pend_approval 经 interrupt() 挂起, REPL 展示审批信息, 用户确认或拒绝后以 Command(resume=approved、rejected) 恢复; 安全操作直接进入 tools 执行。
 - 说明: route_check_mutation 与 dynamic_diff_node(按用户 diff、变更意图触发工作区变更汇总)当前保留实现, 但对应条件连边处于注释状态, 未接入主链路。
-- 系统提示注入: start() 每次启动调用 core\load_sys_prompt.sync_system_prompts(), 用 3 条固定 ID 的 SystemMessage(sys-vibe-coding、sys-struct、sys-skill-index, 均标记 compressible=False) 经 update_state 幂等覆盖或追加, 内容来自 sys_env_prompt、主工作区的 .vcl\struct.md、.vcl\skills\skill_index.md。
+- 系统提示注入: start() 每次启动调用 core\load_sys_prompt.sync_system_prompts(), 用 5 条固定 ID 的 SystemMessage(sys-vibe-coding、sys-struct、sys-code-analysis、sys-code-generate、sys-skill-index, 均标记 compressible=False) 经 update_state 幂等覆盖或追加, 内容来自 sys_env_prompt、主工作区的 .vcl\struct.md、sys_code_analysis_prompt、sys_code_generate_prompt、.vcl\skills\skill_index.md。
 - 专业技能: SkillRegistry 启动时读取 .vcl\skills\skill_index.md 并扫描各技能子目录的 SKILL.md; REPL 内置技能清单快捷指令(输入 skill 或 skills), 可跳过 Agent 直接展示。
-- 消息压缩: 当非系统消息总字符数超过 compress_threshold_chars(compact_msg 节点默认 1200000 以适配 1M 上下文; 压缩模块默认 12000) 且完整轮次多于 compress_keep_last_turns(默认 3) 时触发, 保留最近 N 轮完整对话, 其余折叠为中文滚动摘要。
+- 消息压缩: 门控为 轮数多于 keep_last 且可压缩字符量达到 threshold_chars(默认 1200000, 适配 1M 上下文); 裁剪按闭区间轮次 [start,end] 对齐, 增量优先(仅压缩新增未压缩轮次), 超 max_compressive_messages(默认 50)或历史摘要条数超标时触发全量或联动兜底; 保留最近 N 轮完整对话, 其余折叠为中文滚动摘要(书签 SUMMARY_BOOKMARK_PREFIX)。
 - 消息清理: start() 调用 message_check.check_message_completed(), 删除 tool_calls 未全部完成的 AIMessage 及其孤立 ToolMessage, 保证状态一致。
 - 高危操作人工审批(HITL): REPL 由 stream_events(v3) 驱动打字机流, 检测到 stream.interrupted 时读取 stream.interrupts 展示审批内容, 用户确认后以 Command(resume=...) 恢复执行。
 - 持久化与断点续跑: 见下节。
@@ -99,12 +101,11 @@ Agent 由 LangGraph 同步 StateGraph 驱动, 图定义在 workflow\node_graph.p
 
 ## 测试
 
-消息压缩模块已建立 pytest 测试体系(tests\message\):
+消息压缩模块已建立 pytest 测试体系(tests\test_message_compactor.py, 自包含无 conftest):
 
 | 文件 | 覆盖 | 用例数 |
 | ---- | ---- | ---- |
-| test_message_compactor.py | 纯函数单元层(自包含, 无 conftest): total_size、split_into_turns、should_compress、safe_cutoff(工具链回溯、边界)、render_history、plan_compaction、summarize_with_model | 48 |
-| test_compact_thread_history_integration.py | 真实线程历史集成层(自包含、只读 PostgreSQL, DB 缺失自动 skip): 轮次切分、压缩计划、节点注入、失败兜底、dry-run 预演、批准提交与拒绝不落库、重试重生成 | 16 |
+| test_message_compactor.py | total_size、split_into_turns(闭区间)、should_compress(双门控)、render_history、summarize_with_model(安全跳过、多模态解析)、plan_compaction、safe_cutoff(增量、全量)、compact_msg_node 集成(复杂滚动摘要链路、多条初始摘要合并) | 9 |
 
 运行方式:
 
@@ -148,16 +149,19 @@ print(inspect_table_json("checkpoint_blobs", limit=100, decode_blob=False))
 
 ## 常用 uv 命令
 
-| 命令 | 说明 |
-| ---- | ---- |
+| 命令 | 说明                                             |
+| ---- |--------------------------------------------------|
 | uv sync | 根据 pyproject.toml + uv.lock 安装依赖到虚拟环境 |
-| uv add 包名 | 添加依赖并更新 lock 文件 |
-| uv remove 包名 | 移除依赖 |
-| uv run 命令 | 在项目虚拟环境中运行命令(自动创建 venv) |
-| uv python install 3.13 | 安装指定版本 Python |
-| uv lock | 重新生成锁定文件 |
-| uv build | 构建 wheel + sdist 发布包 |
-| uv tool install . | 全局安装本项目命令行工具 |
+| uv add 包名 | 添加依赖并更新 lock 文件                         |
+| uv remove 包名 | 移除依赖                                         |
+| uv run 命令 | 在项目虚拟环境中运行命令(自动创建 venv)          |
+| uv python install 3.13 | 安装指定版本 Python                              |
+| uv lock | 重新生成锁定文件                                 |
+| uv build | 构建 wheel + sdist 发布包                        |
+| uv tool install . | 全局安装本项目命令行工具                         |
+| uuv run pytest | 运行所有测试                                     |
+| uv run pytest -v | 显示详细输出                                     |
+| uv run pytest tests/test_message_compactor.py | 运行指定测试文件                                 |
 
 ## 构建与安装
 
@@ -172,23 +176,25 @@ uv tool install .       # 全局安装命令行工具
 
 项目配置集中在项目根目录 .env 中(main.py 会按候选顺序查找: 当前工作目录(兼容 exe 打包) -> 项目根目录, 并支持 APP_ENV 指定的 .env.{APP_ENV})。
 
-| 配置项 | 说明 | 示例 |
-| ---- | ---- | ---- |
-| model_provider | 模型厂商(传给 get_model), 决定读取哪一组厂商变量 | deepseek |
-| DEEPSEEK_MODEL_NAME | DeepSeek 模型名(provider=deepseek 时) | deepseek-chat |
+| 配置项 | 说明 | 示例             |
+| ---- | ---- |------------------|
+| model_provider | 模型厂商(传给 get_model), 决定读取哪一组厂商变量 | deepseek         |
+| DEEPSEEK_MODEL_NAME | DeepSeek 模型名(provider=deepseek 时) | deepseek-chat    |
 | DEEPSEEK_BASE_URL | DeepSeek API 接口地址 | api.deepseek.com |
-| DEEPSEEK_API_KEY | DeepSeek API 密钥 | sk-xxxxxxxx |
-| OPENAI_MODEL_NAME | OpenAI 兼容模型名(provider=openai 时) | gpt-4o |
-| OPENAI_BASE_URL | OpenAI 兼容接口地址 | api.openai.com |
-| OPENAI_API_KEY | OpenAI API 密钥 | sk-xxxxxxxx |
-| temperature | 采样温度, 默认 0.0 | 0.0 |
-| logger.dir | 日志输出目录(logs\) | 绝对路径 |
-| database_url | PostgreSQL 连接串(LangGraph Checkpointer 持久化, psycopg 同步, postgresql 协议) | 参考 .env |
-| work_dir | 工作区根目录, 支持多个(逗号或分号分隔), 首个为主工作区; enforce_workspace_security 的权限边界 | 绝对路径 |
-| compress_threshold_chars | 消息压缩触发阈值(非系统消息总字符数超限即压缩) | 12000 |
-| compress_keep_last_turns | 消息压缩保留的最近完整轮次数(默认 3 轮) | 3 |
-| IDEA_HOME | IDEA 可执行文件路径(show_diff_tool 拉起 diff 对比) | 绝对路径 |
-| LANGSMITH_* | LangSmith 链路观测(TRACING、ENDPOINT、API_KEY、PROJECT) | 参考 .env |
+| DEEPSEEK_API_KEY | DeepSeek API 密钥 | sk-xxxxxxxx      |
+| OPENAI_MODEL_NAME | OpenAI 兼容模型名(provider=openai 时) | gpt-4o           |
+| OPENAI_BASE_URL | OpenAI 兼容接口地址 | api.openai.com   |
+| OPENAI_API_KEY | OpenAI API 密钥 | sk-xxxxxxxx      |
+| temperature | 采样温度, 默认 0.0 | 0.0              |
+| logger.dir | 日志输出目录(logs\) | 绝对路径         |
+| database_url | PostgreSQL 连接串(LangGraph Checkpointer 持久化, psycopg 同步, postgresql 协议) | 参考 .env        |
+| work_dir | 工作区根目录, 支持多个(逗号或分号分隔), 首个为主工作区; enforce_workspace_security 的权限边界 | 绝对路径         |
+| security_opt_skip | 跳过安全限制 | False            |
+| compress_threshold_chars | 消息压缩触发阈值(可压缩字符量达到该值即压缩) | 1200000          |
+| compress_keep_last_turns | 消息压缩保留的最近完整轮次数(默认 3 轮) | 3                |
+| max_compressive_messages | 单次压缩批次上限(未压缩轮次超限则全量兜底; 历史摘要条数超限则联动压缩) | 10               |
+| IDEA_HOME | IDEA 可执行文件路径(show_diff_tool 拉起 diff 对比) | 绝对路径         |
+| LANGSMITH_* | LangSmith 链路观测(TRACING、ENDPOINT、API_KEY、PROJECT) | 参考 .env        |
 
 说明:
 

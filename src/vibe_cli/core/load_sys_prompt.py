@@ -4,11 +4,15 @@ import os
 from langchain_core.messages import SystemMessage
 from loguru import logger
 
+from vibe_cli.prompt.sys_code_analysis_prompt import code_analysis_prompt
+from vibe_cli.prompt.sys_code_generate_prompt import code_generate_prompt
 from vibe_cli.prompt.sys_env_prompt import sys_vibe_coding_agent
 from vibe_cli.skill.loading_skill import SkillRegistry
 
 SYS_ID_VIBE_CODING = "sys-vibe-coding"
 SYS_ID_STRUCT = "sys-struct"
+SYS_ID_CODE_ANALYSIS = "sys-code-analysis"
+SYS_ID_CODE_GENERATE = "sys-code-generate"
 SYS_ID_SKILL_INDEX = "sys-skill-index"
 
 def _load_system_struct_prompt(primary_dir: str) -> str:
@@ -35,6 +39,8 @@ def _load_system_struct_prompt(primary_dir: str) -> str:
 def _init_sys_prompt(skill_registry: SkillRegistry, work_dirs: list[str] | None) -> list[SystemMessage]:
     system_vibe_coding_prompt = sys_vibe_coding_agent(work_dirs)
     system_struct_prompt = _load_system_struct_prompt(work_dirs[0])
+    system_code_analysis_prompt = code_analysis_prompt()
+    system_code_generate_prompt = code_generate_prompt()
     system_skill_index_prompt = skill_registry.index_content
 
     system_prompts = [
@@ -50,6 +56,24 @@ def _init_sys_prompt(skill_registry: SkillRegistry, work_dirs: list[str] | None)
             SystemMessage(
                 id=SYS_ID_STRUCT,
                 content=system_struct_prompt,
+                additional_kwargs={"compressible": False}
+            )
+        )
+
+    if system_code_analysis_prompt and system_code_analysis_prompt.strip():
+        system_prompts.append(
+            SystemMessage(
+                id=SYS_ID_CODE_ANALYSIS,
+                content=system_code_analysis_prompt,
+                additional_kwargs={"compressible": False}
+            )
+        )
+
+    if system_code_generate_prompt and system_code_generate_prompt.strip():
+        system_prompts.append(
+            SystemMessage(
+                id=SYS_ID_CODE_GENERATE,
+                content=system_code_generate_prompt,
                 additional_kwargs={"compressible": False}
             )
         )

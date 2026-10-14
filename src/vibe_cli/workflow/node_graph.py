@@ -12,14 +12,14 @@ from vibe_cli.core.node_state import AgentState
 from vibe_cli.env.check_point_memory import postgres_memory
 from vibe_cli.env.logger_config import logger
 from vibe_cli.env.workspace import get_primary_work_dir
-from vibe_cli.message.message_compactor import plan_compaction, summarize_with_model
+from vibe_cli.message.message_compactor import DEFAULT_KEEP_LAST_TURNS, DEFAULT_THRESHOLD_CHARS, plan_compaction, \
+    summarize_with_model, DEFAULT_MAX_COMPRESSIVE_MESSAGES, is_summary_message
 from vibe_cli.model.model_factory import get_model
 from vibe_cli.prompt.sys_diff_prompt import diff_prompt
 from vibe_cli.prompt.sys_safe_check_prompt import sys_safe_check_prompt
 from vibe_cli.tools import ALL_TOOLS, DANGEROUS_TOOLS
 from vibe_cli.wraps.monitor import monitor_node
 
-SUMMARY_BOOKMARK_PREFIX = "【历史摘要】以下是早期对话的摘要（已压缩省略）：\\n"
 
 
 def route_agent(state: AgentState) -> Literal["safety_check_path", "end_path"]:
@@ -120,88 +120,86 @@ def call_model(state: AgentState):
         "node_status": "normal"
     }
 
+# 假设定义了滚动摘要的书签前缀常量
+SUMMARY_BOOKMARK_PREFIX = "<!-- [ROLLING_SUMMARY] -->"
 
 @monitor_node("compact_msg_node")
-def compact_msg_node(state, config):
+def compact_msg_node(state, config=None):
     """消息历史压缩节点（图入口）。
 
-    在每轮对话开始前运行。当累积的对话超出配置的阈值时，
-    将最旧的完整对话轮次通过大模型归纳为滚动摘要，并通过 RemoveMessage 进行裁剪，
+    在每轮对话开始前运行。当累积的对话超出配置的阈值或达到最大条数上限时，
+    将最旧的完整对话轮次归纳为滚动摘要，并通过 RemoveMessage 进行精准裁剪与原地重建，
     从而保持大模型上下文在安全范围内。如果归纳失败，则安全跳过。
     """
     messages = state.get("messages", [])
     if not messages:  # 冷启动无消息
         return {}
 
-    # 适配 1M Context Window 的默认阈值（120万字符）
-    threshold = int(os.getenv("compress_threshold_chars", "1200000"))
-    keep_last_turns = int(os.getenv("compress_keep_last_turns", "3"))
+    # 从 state 或环境变量/config 中获取动态配置参数
+    configurable = (config or {}).get("configurable", {})
+    threshold = int(configurable.get("compress_threshold_chars", DEFAULT_THRESHOLD_CHARS))
+    keep_last_turns = int(configurable.get("compress_keep_last_turns", DEFAULT_KEEP_LAST_TURNS))
+    max_msgs = int(configurable.get("max_compressive_messages", DEFAULT_MAX_COMPRESSIVE_MESSAGES))
 
-    # 获取由 plan_compaction 返回的起止绝对索引及历史消息
-    plan = plan_compaction(messages, keep_last_turns=keep_last_turns, threshold_chars=threshold)
+    # 获取由 plan_compaction 返回的起止闭区间索引 (start_idx, end_idx) 及历史消息
+    plan = plan_compaction(
+        messages,
+        keep_last_turns=keep_last_turns,
+        threshold_chars=threshold,
+        max_compressive_messages=max_msgs
+    )
     if plan is None:  # 上下文体积依然在安全范围内，无需压缩
         return {}
-    start_idx, cutoff, history = plan
 
-    # 1. 提取所有匹配的旧摘要内容
-    # 2. 遍历每一行/每一条旧摘要，在末尾拼接逗号 ","
-    # 3. 用换行符连接成一个多行汇总字符串
-    old_summary = "\n".join(
-        f"对话{index},内容：\n{str(m.text)} \n"
-        for index, m in enumerate(messages[start_idx:cutoff], start=start_idx)
-        if m.text
-    )
+    start_idx, end_idx, history = plan
+    # 将闭区间的 end_idx 转换为切片用的 exclusive 边界
+    cutoff = end_idx + 1
 
+    # 1. 精准提取历史中已存在的既有滚动摘要（解耦投喂，绝不重复计算）
+    existing_summary_msg = next((m for m in messages[:start_idx] if is_summary_message(m)), None)
+    previous_summary = getattr(existing_summary_msg, 'content', '') if existing_summary_msg else ""
+    if previous_summary.startswith(SUMMARY_BOOKMARK_PREFIX):
+        previous_summary = previous_summary[len(SUMMARY_BOOKMARK_PREFIX):].strip()
+
+    # 2. 调用模型生成新滚动摘要
     model = get_model(provider=state.get("model_provider"))
-
-    new_summary = summarize_with_model(model, old_summary, history)
+    new_summary = summarize_with_model(model, previous_summary, history)
     if not new_summary:  # 摘要生成失败，本轮放弃裁剪以防破坏状态
+        logger.warning("[Compact] 大模型摘要生成失败，安全跳过。")
         return {}
 
-    # 1. 明确待压缩区和保留区
-    history_to_compress = messages[start_idx:cutoff]
-    kept_messages = messages[cutoff:]
+    # 3. 构造删除指令：清除裁剪 start_idx 开始到最后的数据。新数据及保留的数据重建
+    removals = [RemoveMessage(id=m.id) for m in messages[start_idx:] if getattr(m, "id", None)]
 
-    # 2. 移除从 start_idx 开始的【所有】后续消息（防止顺序错乱）
-    removals = [
-        RemoveMessage(id=m.id)
-        for m in messages[start_idx:]
-        if getattr(m, "id", None)
-    ]
-
-    # 3. 构造历史摘要消息
+    # 4. 构造新摘要消息
     summary_msg = HumanMessage(
         id="summary-" + uuid.uuid4().hex[:16],
         content=SUMMARY_BOOKMARK_PREFIX + new_summary,
-        additional_kwargs={"is_summary": True}
+        additional_kwargs={"is_summary": True, "compressible": False}
     )
 
-    # 4. 重新克隆保留区消息（重新赋予新 ID，确保被 LangGraph 识别为全新追加的消息）
-    rebuilt_tail = []
-    for m in kept_messages:
-        clone = m.model_copy(deep=True)
-        clone.id = "keep-" + uuid.uuid4().hex[:16]
-        rebuilt_tail.append(clone)
+    # 5. 克隆保留区消息并赋予新 ID，确保被 LangGraph 识别为全新追加的消息
+    rebuilt_tail = [
+        m.model_copy(update={"id": "keep-" + m.id})
+        for m in messages[cutoff:]
+    ]
 
-    logger.info(
-        "[Compact] absorbed {} msgs, rebuilt tail with summary len={}",
-        len(history_to_compress),
-        len(new_summary)
-    )
-
-    # 5. 按严格顺序返回：删除指令 -> 摘要消息 -> 保留的最近消息
+    logger.info("[Compact] absorbed {} msgs (closed interval up to {}), summary len={}", (end_idx - start_idx + 1),
+                end_idx, len(new_summary))
     return {"messages": removals + [summary_msg] + rebuilt_tail}
 
 
 @monitor_node("safety_check_node")
-def safety_check_node(state: AgentState):
+def safety_check_node(state: AgentState,config):
     """
     安全检查与分流节点（核心拦截点）
     :param state:
     :return:
     """
 
-    if state.get("security_opt_skip",False):
+    configurable = (config or {}).get("configurable", {})
+
+    if configurable.get("security_opt_skip",False):
         return {"requires_approval": False, "node_status": "normal"}
 
     messages = state.get("messages", [])

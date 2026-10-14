@@ -17,4 +17,3 @@ class AgentState(TypedDict):
     model_provider: str
     work_dir: str
 
-    security_opt_skip: bool # 跳过安全限制
