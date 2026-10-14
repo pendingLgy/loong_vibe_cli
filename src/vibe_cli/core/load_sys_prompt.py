@@ -11,12 +11,10 @@ SYS_ID_VIBE_CODING = "sys-vibe-coding"
 SYS_ID_STRUCT = "sys-struct"
 SYS_ID_SKILL_INDEX = "sys-skill-index"
 
-def _load_system_struct_prompt() -> str:
+def _load_system_struct_prompt(primary_dir: str) -> str:
     # 1. 优先从当前工作目录 (work_dir 或 os.getcwd()) 下的 .vcl 目录中读取 struct.md
-    work_dir = os.getenv("work_dir") or os.getcwd()
-
     candidates = [
-        os.path.join(work_dir, ".vcl", "struct.md"),
+        os.path.join(str(primary_dir), ".vcl", "struct.md")
     ]
 
     # 2. 如果需要保留对项目根目录的兜底，可以在这里继续添加备选路径
@@ -34,9 +32,9 @@ def _load_system_struct_prompt() -> str:
 
     return ""
 
-def _init_sys_prompt(skill_registry: SkillRegistry, work_dir: str | None) -> list[SystemMessage]:
-    system_vibe_coding_prompt = sys_vibe_coding_agent(work_dir)
-    system_struct_prompt = _load_system_struct_prompt()
+def _init_sys_prompt(skill_registry: SkillRegistry, work_dirs: list[str] | None) -> list[SystemMessage]:
+    system_vibe_coding_prompt = sys_vibe_coding_agent(work_dirs)
+    system_struct_prompt = _load_system_struct_prompt(work_dirs[0])
     system_skill_index_prompt = skill_registry.index_content
 
     system_prompts = [
@@ -68,11 +66,11 @@ def _init_sys_prompt(skill_registry: SkillRegistry, work_dir: str | None) -> lis
     return system_prompts
 
 
-def sync_system_prompts(app, config: dict, skill_registry: SkillRegistry, work_dir: str | None):
+def sync_system_prompts(app, config: dict, skill_registry: SkillRegistry, work_dirs: list[str] | None):
     """每次启动时调用：自动创建或覆盖现有的 3 个 SystemMessage。"""
 
     # 1. 生成带有固定 ID 的最新系统提示词列表
-    latest_sys_prompts = _init_sys_prompt(skill_registry, work_dir)
+    latest_sys_prompts = _init_sys_prompt(skill_registry, work_dirs)
 
     # 2. 直接更新状态（LangGraph 匹配到已存在的 ID 会自动覆盖，未匹配到则追加）
     app.update_state(
