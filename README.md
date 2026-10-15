@@ -149,19 +149,24 @@ print(inspect_table_json("checkpoint_blobs", limit=100, decode_blob=False))
 
 ## 常用 uv 命令
 
-| 命令 | 说明                                             |
-| ---- |--------------------------------------------------|
-| uv sync | 根据 pyproject.toml + uv.lock 安装依赖到虚拟环境 |
-| uv add 包名 | 添加依赖并更新 lock 文件                         |
-| uv remove 包名 | 移除依赖                                         |
-| uv run 命令 | 在项目虚拟环境中运行命令(自动创建 venv)          |
-| uv python install 3.13 | 安装指定版本 Python                              |
-| uv lock | 重新生成锁定文件                                 |
-| uv build | 构建 wheel + sdist 发布包                        |
-| uv tool install . | 全局安装本项目命令行工具                         |
-| uuv run pytest | 运行所有测试                                     |
-| uv run pytest -v | 显示详细输出                                     |
-| uv run pytest tests/test_message_compactor.py | 运行指定测试文件                                 |
+| 命令                                                                         | 说明                                             |
+|------------------------------------------------------------------------------|--------------------------------------------------|
+| uv sync                                                                      | 根据 pyproject.toml + uv.lock 安装依赖到虚拟环境 |
+| uv add 包名                                                                  | 添加依赖并更新 lock 文件                         |
+| uv remove 包名                                                               | 移除依赖                                         |
+| uv run 命令                                                                  | 在项目虚拟环境中运行命令(自动创建 venv)          |
+| uv python install 3.13                                                       | 安装指定版本 Python                              |
+| uv lock                                                                      | 重新生成锁定文件                                 |
+| uv build                                                                     | 构建 wheel + sdist 发布包                        |
+| uv tool install .                                                            | 全局安装本项目命令行工具                         |
+| uv run pytest                                                                | 运行所有测试                                     |
+| uv run pytest -v                                                             | 显示详细输出                                     |
+| uv run pytest tests/test_message_compactor.py                                | 运行指定测试文件                                 |
+| uv pip list                                                                  | 查看安装的依赖                                   |
+| uv sync --upgrade                                                            | 将所有依赖全部升级到最新版本                     |
+| uv lock --upgrade                                                            | 强制通过 uv 重新锁定并安装                       |
+| uv sync --refresh                                                            |                                                  |
+| uv python -m pip show langchain-anthropic anthropic langchain-core pydantic  | 查看依赖关系                                     |
 
 ## 构建与安装
 

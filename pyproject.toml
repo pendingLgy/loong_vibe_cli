@@ -10,7 +10,8 @@ requires-python = ">=3.13"
 dependencies = [
     "grandalf>=0.8",
     "langchain==1.4.0",
-    "langchain-openai>=1.5.1",
+    "langchain-openai==1.6.7",
+    "langchain-anthropic==1.7.5",
     "langgraph>=1.2.11",
     "langgraph-checkpoint-postgres>=3.1.2",
     "loguru>=0.7.3",
