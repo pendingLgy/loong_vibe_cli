@@ -34,8 +34,12 @@ def total_size(messages) -> int:
     for msg in messages:
         if getattr(msg, 'type', None) == 'system' or isinstance(msg, SystemMessage):
             continue
-        content = getattr(msg, 'content', '')
-        total += len(str('' if content is None else content))
+
+        val = getattr(msg, 'text', None)
+        if val is None or val == '':
+            val = getattr(msg, 'content', '')
+
+        total += len(str('' if val is None else val))
     return total
 
 
