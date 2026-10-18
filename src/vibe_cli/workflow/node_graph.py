@@ -121,7 +121,7 @@ def call_model(state: AgentState):
     }
 
 # 假设定义了滚动摘要的书签前缀常量
-SUMMARY_BOOKMARK_PREFIX = "<!-- [ROLLING_SUMMARY] -->"
+SUMMARY_BOOKMARK_PREFIX = "<!-- [ROLLING_SUMMARY] -->\n"
 
 @monitor_node("compact_msg_node")
 def compact_msg_node(state, config=None):

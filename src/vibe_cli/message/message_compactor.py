@@ -176,14 +176,13 @@ def summarize_with_model(model, previous_summary: str, history_messages: list) -
         response = model.invoke([
             HumanMessage(content=prompt_text),
         ])
-        content = getattr(response, 'content', None)
-        if content is None:
+
+        # 使用你确认的非流式 .text 提取与清洗方式
+        if not response or not hasattr(response, 'text'):
             return ''
-        if isinstance(content, list):
-            text = ' '.join(str(block) for block in content)
-        else:
-            text = str(content)
-        return text.strip()
+
+        return response.text.strip()
+
     except Exception as exc:
         logger.exception('[Compact] summarize model failed, safe-skip: {0}'.format(exc))
         return ''
