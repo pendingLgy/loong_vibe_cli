@@ -13,8 +13,6 @@ from vibe_cli.env.logger_config import logger
 DEFAULT_THRESHOLD_CHARS = 1200000
 # 默认无条件保留的最近对话轮次
 DEFAULT_KEEP_LAST_TURNS = 12
-# 默认单次压缩允许处理的最大历史可压缩消息条数 (溢出保护/批次上限)
-DEFAULT_MAX_COMPRESSIVE_MESSAGES = 50
 
 # 摘要模型使用的固定系统指令
 SUMMARY_SYSTEM_INSTRUCTION = 'You are a meticulous conversation summarizer. Follow the user instruction exactly.'
@@ -77,17 +75,17 @@ def should_compress(
 def safe_cutoff(
         messages,
         keep_last=DEFAULT_KEEP_LAST_TURNS,
-        max_compressive_messages=DEFAULT_MAX_COMPRESSIVE_MESSAGES,
 ) -> tuple[int, int] | None:
     """计算安全的裁剪闭区间 (start_idx, end_idx)。
     逻辑说明：
-      - 统计现有历史摘要的条数。若历史摘要条数 > max_compressive_messages，
-        则将历史摘要一起加入本次压缩范围（起点前置到摘要处）；
-      - 否则，若未压缩的新消息条数未超上限且无摘要超标，则只压缩新增的未压缩轮次；
-      - 否则启动全量兜底。
+    1. 找出对话轮数并过滤掉保留的最后几轮；
+    2. 统计现有历史摘要的次数（条数）；
+    3. 若摘要次数 >= 阈值(keep_last)，触发全量压缩（包含旧摘要）；否则触发增量压缩（排除已压缩消息）。
     """
     if not messages:
         return None
+
+    # 步骤 1：找出对话轮数并过滤掉保留的最后几轮
     turns = split_into_turns(messages)
     if not turns or len(turns) <= keep_last:
         return None
@@ -96,46 +94,29 @@ def safe_cutoff(
     if not candidate_turns:
         return None
 
-    # 1. 获取所有历史摘要的索引
+    # 步骤 2：统计现有历史摘要的次数
     existing_summary_indices = [i for i, m in enumerate(messages) if is_summary_message(m)]
     summary_count = len(existing_summary_indices)
-
-    # 2. 直接复用 max_compressive_messages 判定历史摘要条数是否超标
-    has_excessive_summaries = summary_count > max_compressive_messages
-
-    # 3. 划分未压缩的候选轮次
     last_summary_idx = existing_summary_indices[-1] if existing_summary_indices else -1
-    uncompressed_candidate_turns = [
-        (t_start, t_end) for t_start, t_end in candidate_turns
-        if t_start > last_summary_idx
-    ]
 
-    # 4. 判定增量还是全量/联动压缩
-    total_uncompressed_msgs = sum((t_end - t_start + 1) for t_start, t_end in uncompressed_candidate_turns)
+    # 步骤 3：根据摘要次数是否达到阈值（keep_last）判定全量或增量
+    is_full_compression = summary_count >= keep_last
 
-    if total_uncompressed_msgs <= max_compressive_messages and uncompressed_candidate_turns and not has_excessive_summaries:
-        # 未超条数上限 且 历史摘要条数也未超标：仅增量压缩新轮次
-        selected_turns = uncompressed_candidate_turns
+    if is_full_compression:
+        # 全量压缩：将旧摘要伪装成单条轮次 + 所有候选轮次一次性全部纳入
+        summary_turns = [(s, s) for s in existing_summary_indices]
+        selected_turns = summary_turns + candidate_turns
     else:
-        # 触发全量兜底 或 历史摘要条数超过 max_compressive_messages
-        selected_turns = []
-        accumulated_count = 0
-        for t_start, t_end in candidate_turns:
-            turn_msgs_count = t_end - t_start + 1
-            if accumulated_count + turn_msgs_count > max_compressive_messages and selected_turns:
-                break
-            selected_turns.append((t_start, t_end))
-            accumulated_count += turn_msgs_count
+        # 增量压缩：严格排除已经压缩过的消息，只取未压缩的候选轮次
+        selected_turns = [
+            (t_start, t_end) for t_start, t_end in candidate_turns
+            if t_start > last_summary_idx
+        ]
 
     if not selected_turns:
         return None
 
-    # 如果历史摘要条数超标，将裁剪起点向前延伸包含旧摘要；否则从选中的首个轮次开始
-    if has_excessive_summaries and existing_summary_indices:
-        start_idx = min(existing_summary_indices[0], selected_turns[0][0])
-    else:
-        start_idx = selected_turns[0][0]
-
+    start_idx = selected_turns[0][0]
     end_idx = selected_turns[-1][1]
 
     if end_idx < start_idx or end_idx >= len(messages):
@@ -170,14 +151,13 @@ def plan_compaction(
         messages,
         keep_last_turns=DEFAULT_KEEP_LAST_TURNS,
         threshold_chars=DEFAULT_THRESHOLD_CHARS,
-        max_compressive_messages=DEFAULT_MAX_COMPRESSIVE_MESSAGES,
 ) -> tuple[int, int, list] | None:
     """门控与裁剪规划器：若满足压缩条件则返回 (start_idx, cutoff, 待压缩历史列表)，否则返回 None。"""
     if not messages:
         return None
     if not should_compress(messages, keep_last_turns, threshold_chars):
         return None
-    span = safe_cutoff(messages, keep_last_turns, max_compressive_messages)
+    span = safe_cutoff(messages, keep_last_turns)
     if span is None:
         return None
     start_idx, cutoff = span
@@ -194,7 +174,6 @@ def summarize_with_model(model, previous_summary: str, history_messages: list) -
     try:
         prompt_text = sys_summarize_prompt(previous_summary, render_history(history_messages))
         response = model.invoke([
-            SystemMessage(content=SUMMARY_SYSTEM_INSTRUCTION),
             HumanMessage(content=prompt_text),
         ])
         content = getattr(response, 'content', None)

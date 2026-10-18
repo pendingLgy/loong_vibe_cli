@@ -13,7 +13,7 @@ from vibe_cli.env.check_point_memory import postgres_memory
 from vibe_cli.env.logger_config import logger
 from vibe_cli.env.workspace import get_primary_work_dir
 from vibe_cli.message.message_compactor import DEFAULT_KEEP_LAST_TURNS, DEFAULT_THRESHOLD_CHARS, plan_compaction, \
-    summarize_with_model, DEFAULT_MAX_COMPRESSIVE_MESSAGES, is_summary_message
+    summarize_with_model, is_summary_message
 from vibe_cli.model.model_factory import get_model
 from vibe_cli.prompt.sys_diff_prompt import diff_prompt
 from vibe_cli.prompt.sys_safe_check_prompt import sys_safe_check_prompt
@@ -139,14 +139,12 @@ def compact_msg_node(state, config=None):
     configurable = (config or {}).get("configurable", {})
     threshold = int(configurable.get("compress_threshold_chars", DEFAULT_THRESHOLD_CHARS))
     keep_last_turns = int(configurable.get("compress_keep_last_turns", DEFAULT_KEEP_LAST_TURNS))
-    max_msgs = int(configurable.get("max_compressive_messages", DEFAULT_MAX_COMPRESSIVE_MESSAGES))
 
     # 获取由 plan_compaction 返回的起止闭区间索引 (start_idx, end_idx) 及历史消息
     plan = plan_compaction(
         messages,
         keep_last_turns=keep_last_turns,
         threshold_chars=threshold,
-        max_compressive_messages=max_msgs
     )
     if plan is None:  # 上下文体积依然在安全范围内，无需压缩
         return {}
