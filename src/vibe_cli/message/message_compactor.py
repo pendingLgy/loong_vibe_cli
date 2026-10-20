@@ -13,9 +13,9 @@ from vibe_cli.env.logger_config import logger
 DEFAULT_THRESHOLD_CHARS = 1200000
 # 默认无条件保留的最近对话轮次
 DEFAULT_KEEP_LAST_TURNS = 12
+# 默认消息压缩保留已压缩消息次数
+DEFAULT_COMPRESS_KEEP_SUMMARIES = 6
 
-# 摘要模型使用的固定系统指令
-SUMMARY_SYSTEM_INSTRUCTION = 'You are a meticulous conversation summarizer. Follow the user instruction exactly.'
 
 
 def is_summary_message(msg) -> bool:
@@ -69,12 +69,14 @@ def should_compress(
     chars = total_size(messages)
     normal_trigger = (turn_count > keep_last) and (chars >= threshold_chars)
 
+    logger.info(f"keep_last:{keep_last} threshold_chars:{threshold_chars} turn:{turn_count}  chars:{chars}")
     return normal_trigger
 
 
 def safe_cutoff(
         messages,
         keep_last=DEFAULT_KEEP_LAST_TURNS,
+        compress_keep_summaries=DEFAULT_COMPRESS_KEEP_SUMMARIES,
 ) -> tuple[int, int] | None:
     """计算安全的裁剪闭区间 (start_idx, end_idx)。
     逻辑说明：
@@ -99,8 +101,8 @@ def safe_cutoff(
     summary_count = len(existing_summary_indices)
     last_summary_idx = existing_summary_indices[-1] if existing_summary_indices else -1
 
-    # 步骤 3：根据摘要次数是否达到阈值（keep_last）判定全量或增量
-    is_full_compression = summary_count >= keep_last
+    # 步骤 3：根据摘要次数是否达到阈值（compress_keep_summaries）判定全量或增量
+    is_full_compression = summary_count >= compress_keep_summaries
 
     if is_full_compression:
         # 全量压缩：将旧摘要伪装成单条轮次 + 所有候选轮次一次性全部纳入
@@ -151,13 +153,14 @@ def plan_compaction(
         messages,
         keep_last_turns=DEFAULT_KEEP_LAST_TURNS,
         threshold_chars=DEFAULT_THRESHOLD_CHARS,
+        compress_keep_summaries=DEFAULT_COMPRESS_KEEP_SUMMARIES,
 ) -> tuple[int, int, list] | None:
     """门控与裁剪规划器：若满足压缩条件则返回 (start_idx, cutoff, 待压缩历史列表)，否则返回 None。"""
     if not messages:
         return None
     if not should_compress(messages, keep_last_turns, threshold_chars):
         return None
-    span = safe_cutoff(messages, keep_last_turns)
+    span = safe_cutoff(messages, keep_last_turns,compress_keep_summaries)
     if span is None:
         return None
     start_idx, cutoff = span

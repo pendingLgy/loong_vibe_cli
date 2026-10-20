@@ -40,10 +40,10 @@ def create_workflow_img(app: CompiledStateGraph[Any, Any, Any, Any], work_dir: s
 def start():
     work_dir = os.getenv("work_dir")
     model_provider = os.getenv("model_provider")
-    security_opt_skip = bool(os.getenv("security_opt_skip",False))
-    compress_threshold_chars = int(os.getenv("compress_threshold_chars", "1200000"))
-    compress_keep_last_turns = int(os.getenv("compress_keep_last_turns", "3"))
-    max_compressive_messages = int(os.getenv("max_compressive_messages", "10"))
+    security_opt_skip = bool(os.getenv("security_opt_skip",True))
+    compress_threshold_chars = int(os.getenv("compress_threshold_chars", "600000"))
+    compress_keep_last_turns = int(os.getenv("compress_keep_last_turns", "1"))
+    compress_keep_summaries = int(os.getenv("compress_keep_summaries", "2"))
 
     required_fields = {
         "work_dir": work_dir,
@@ -67,12 +67,12 @@ def start():
     config = {
         "configurable": {
             # "thread_id": str(uuid.uuid4()),
-            "thread_id": "123061",
+            "thread_id": "123072",
             "skill_registry": skill_registry,
             "security_opt_skip": security_opt_skip, # 跳过安全限制
             "compress_threshold_chars": compress_threshold_chars, # 消息压缩触发阈值
             "compress_keep_last_turns": compress_keep_last_turns, # 消息压缩保留轮次
-            "max_compressive_messages": max_compressive_messages,
+            "compress_keep_summaries": compress_keep_summaries,  # 消息压缩保留已压缩消息次数
         }
     }
 

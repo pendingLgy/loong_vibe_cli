@@ -139,12 +139,14 @@ def compact_msg_node(state, config=None):
     configurable = (config or {}).get("configurable", {})
     threshold = int(configurable.get("compress_threshold_chars", DEFAULT_THRESHOLD_CHARS))
     keep_last_turns = int(configurable.get("compress_keep_last_turns", DEFAULT_KEEP_LAST_TURNS))
+    compress_keep_summaries = int(configurable.get("compress_keep_summaries", DEFAULT_KEEP_LAST_TURNS))
 
     # 获取由 plan_compaction 返回的起止闭区间索引 (start_idx, end_idx) 及历史消息
     plan = plan_compaction(
         messages,
         keep_last_turns=keep_last_turns,
         threshold_chars=threshold,
+        compress_keep_summaries=compress_keep_summaries
     )
     if plan is None:  # 上下文体积依然在安全范围内，无需压缩
         return {}
