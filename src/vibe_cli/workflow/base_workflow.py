@@ -67,7 +67,9 @@ def start():
     config = {
         "configurable": {
             # "thread_id": str(uuid.uuid4()),
-            "thread_id": "123072",
+            "thread_id": "123078",
+            "model_provider": model_provider,
+            "work_dir": work_dir,
             "skill_registry": skill_registry,
             "security_opt_skip": security_opt_skip, # 跳过安全限制
             "compress_threshold_chars": compress_threshold_chars, # 消息压缩触发阈值
@@ -113,8 +115,6 @@ def start():
 
             # 初始输入流或恢复流
             stream_input = {
-                "model_provider": model_provider,
-                "work_dir": work_dir,
                 "messages": [HumanMessage(content=user_input)]
             }
 

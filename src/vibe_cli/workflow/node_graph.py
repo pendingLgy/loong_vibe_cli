@@ -104,15 +104,18 @@ def route_approval(state: AgentState):
 
 
 @monitor_node("call_model")
-def call_model(state: AgentState):
+def call_model(state: AgentState, config):
     """
     大模型推理节点
     :param state:
     :return:
     """
 
+    configurable = (config or {}).get("configurable", {})
+    model_provider = (configurable or {}).get("model_provider", {})
+
     messages = state.get("messages", [])
-    response = get_model(provider=state.get("model_provider")).bind_tools(ALL_TOOLS).invoke(messages)
+    response = get_model(provider=model_provider).bind_tools(ALL_TOOLS).invoke(messages)
 
     return {
         "messages": [response],
@@ -124,7 +127,7 @@ def call_model(state: AgentState):
 SUMMARY_BOOKMARK_PREFIX = "<!-- [ROLLING_SUMMARY] -->\n"
 
 @monitor_node("compact_msg_node")
-def compact_msg_node(state, config=None):
+def compact_msg_node(state, config):
     """消息历史压缩节点（图入口）。
 
     在每轮对话开始前运行。当累积的对话超出配置的阈值或达到最大条数上限时，
@@ -137,6 +140,8 @@ def compact_msg_node(state, config=None):
 
     # 从 state 或环境变量/config 中获取动态配置参数
     configurable = (config or {}).get("configurable", {})
+
+    model_provider = (configurable or {}).get("model_provider", {})
     threshold = int(configurable.get("compress_threshold_chars", DEFAULT_THRESHOLD_CHARS))
     keep_last_turns = int(configurable.get("compress_keep_last_turns", DEFAULT_KEEP_LAST_TURNS))
     compress_keep_summaries = int(configurable.get("compress_keep_summaries", DEFAULT_KEEP_LAST_TURNS))
@@ -162,7 +167,7 @@ def compact_msg_node(state, config=None):
         previous_summary = previous_summary[len(SUMMARY_BOOKMARK_PREFIX):].strip()
 
     # 2. 调用模型生成新滚动摘要
-    model = get_model(provider=state.get("model_provider"))
+    model = get_model(provider=model_provider)
     new_summary = summarize_with_model(model, previous_summary, history)
     if not new_summary:  # 摘要生成失败，本轮放弃裁剪以防破坏状态
         logger.warning("[Compact] 大模型摘要生成失败，安全跳过。")
@@ -198,6 +203,7 @@ def safety_check_node(state: AgentState,config):
     """
 
     configurable = (config or {}).get("configurable", {})
+    model_provider = (configurable or {}).get("model_provider", {})
 
     if configurable.get("security_opt_skip",False):
         return {"requires_approval": False, "node_status": "normal"}
@@ -226,7 +232,7 @@ def safety_check_node(state: AgentState,config):
 
         try:
             # 直接调用标准支持模型
-            response = get_model(provider=state.get("model_provider")).invoke([HumanMessage(content=prompt)])
+            response = get_model(provider=model_provider).invoke([HumanMessage(content=prompt)])
             response_text = response.text.strip()
 
             # 清理可能存在的 markdown 代码块符号 (```json ... ```)
@@ -317,7 +323,7 @@ def pend_approval_interrupt_node(state: AgentState):
 
 
 @monitor_node("dynamic_shell_diff_node")
-def dynamic_shell_diff_node(state: AgentState) -> dict:
+def dynamic_shell_diff_node(state: AgentState, config) -> dict:
     """
         【纯 Python Git 变更收集与报告生成节点】
         不使用 LLM 总结，直接通过 Git 命令、本地解析行号（@@ 块）及绝对路径拼装报告。
@@ -326,8 +332,12 @@ def dynamic_shell_diff_node(state: AgentState) -> dict:
     if not messages:
         return {}
 
+    configurable = (config or {}).get("configurable", {})
+    model_provider = (configurable or {}).get("model_provider", {})
+    work_dir = (configurable or {}).get("work_dir", {})
+
     last_message = messages[-1]
-    cwd = str(get_primary_work_dir(state.get("work_dir") or os.getenv("work_dir", "")))
+    cwd = str(get_primary_work_dir(work_dir or os.getenv("work_dir", "")))
 
     try:
 
@@ -342,7 +352,7 @@ def dynamic_shell_diff_node(state: AgentState) -> dict:
             ))
         ]
 
-        response = get_model(provider=state.get("model_provider")).invoke(prompt)
+        response = get_model(provider=model_provider).invoke(prompt)
 
         summary_report = response.text
         if not summary_report:
