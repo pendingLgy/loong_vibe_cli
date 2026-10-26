@@ -34,6 +34,13 @@ def get_model(provider: str):
             base_url=os.getenv("CLAUDE_BASE_URL", "https://api.anthropic.com"),
             temperature=temperature
         )
+    elif provider == "qwen":
+        return ChatOpenAI(
+            model=os.getenv("QWEN_MODEL_NAME", "qwen3.7-plus"),
+            api_key=os.getenv("QWEN_API_KEY"),
+            base_url=os.getenv("QWEN_BASE_URL", "https://llm-aa9vce2460xvbj3o.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"),
+            temperature=temperature
+        )
     else:
         raise ValueError(f"未知的模型厂商: {provider}")
 
