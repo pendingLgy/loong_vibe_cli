@@ -16,6 +16,7 @@ from vibe_cli.message.message_compactor import DEFAULT_KEEP_LAST_TURNS, DEFAULT_
     summarize_with_model, is_summary_message
 from vibe_cli.model.model_factory import get_model
 from vibe_cli.prompt.sys_diff_prompt import diff_prompt
+from vibe_cli.prompt.sys_input_confirm_prompt import input_message_detect
 from vibe_cli.prompt.sys_safe_check_prompt import sys_safe_check_prompt
 from vibe_cli.tools import ALL_TOOLS, DANGEROUS_TOOLS
 from vibe_cli.wraps.monitor import monitor_node
@@ -102,6 +103,67 @@ def route_approval(state: AgentState):
 
     return "agent_path"
 
+@monitor_node("input_confirm_model")
+def input_confirm_model(state: AgentState, config):
+    """
+    输入内容确认节点
+    如果识别输入内容不完整，提示用户保
+    :param state:
+    :return:
+    """
+
+    configurable = (config or {}).get("configurable", {})
+    model_provider = (configurable or {}).get("model_provider", {})
+
+    messages = state.get("messages", [])
+    last_message = messages[-1]
+
+    msg = input_message_detect(last_message)
+    response = get_model(provider=model_provider).invoke([SystemMessage(content=msg)])
+
+    response_text = response.text.strip()
+
+    # 清理可能存在的 markdown 代码块符号 (```json ... ```)
+    if response_text.startswith("```json"):
+        response_text = response_text[7:]
+    if response_text.endswith("```"):
+        response_text = response_text[:-3]
+
+    try:
+        result_dict = json.loads(response_text.strip())
+
+        # 获取字典中的字段
+        status = result_dict.get("status")
+        summary = result_dict.get("summary")
+        missing_info = result_dict.get("missing_info")
+        questions_list = result_dict.get("questions", [])
+
+        # 将列表转换为带序号的文本
+        questions_str = "\n".join([f"- {q}" for q in questions_list])
+
+        # 使用 f-string 重新组织成字符串
+        reorganized_str = f"""
+        识别到用户的输入信息不完整，需要重新总结返回给用户继续补充内容
+        【校验状态】：{status} \n
+        【意图摘要】：{summary} \n
+        【缺失信息】：{missing_info} \n
+        【引导追问】： \n
+        {questions_str}
+        """
+
+    except Exception as e:
+        logger.error(f"json load fail. result:{response_text}. error: {str(e)}")
+
+        return {
+            "requires_approval": False,
+            "node_status": "normal"
+        }
+
+    return {
+        "messages": [reorganized_str],
+        "requires_approval": False,
+        "node_status": "normal"
+    }
 
 @monitor_node("call_model")
 def call_model(state: AgentState, config):
@@ -383,6 +445,7 @@ def build_vibe_app():
 
     workflow = StateGraph(AgentState)
     workflow.add_node("compact_msg", compact_msg_node)
+    workflow.add_node("input_confirm", input_confirm_model)
     workflow.add_node("agent", call_model)
     workflow.add_node("safety_check", safety_check_node)
     workflow.add_node("pend_approval", pend_approval_interrupt_node)
@@ -390,7 +453,8 @@ def build_vibe_app():
     workflow.add_node("dynamic_diff_node", dynamic_shell_diff_node)
 
     workflow.set_entry_point("compact_msg")
-    workflow.add_edge("compact_msg", "agent")
+    workflow.add_edge("compact_msg", "input_confirm")
+    workflow.add_edge("input_confirm", "agent")
 
     # 【第一步】agent 执行完后进行条件分流：普通对话直接结束，工具调用进安全检查
     workflow.add_conditional_edges(

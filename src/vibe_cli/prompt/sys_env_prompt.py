@@ -14,7 +14,7 @@ def sys_vibe_coding_agent(work_dirs: list[str] | None) -> str:
 {dirs_bullet}
 
 # 临时文件处理
-1. 缓存的文件，零时文件，测试脚本的存放目录为 {primary}/.vcl_cache/。禁止随意存放。使用完成后自动清理
+1. 缓存的文件，临时文件，测试脚本的必须存放在{primary}/.vcl_cache/。禁止随意存放。使用完成后自动清理
 
 # 前期工作准备
 1. **工作环境检查**：检查用户电脑的系统配置。{primary}目录编程语言、文件的字符编码
